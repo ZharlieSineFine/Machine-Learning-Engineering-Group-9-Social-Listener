@@ -33,21 +33,33 @@ class LoadedModel:
 
 
 def _try_mlflow() -> Optional[LoadedModel]:
+    """Pull `models:/<MODEL_NAME>/<MODEL_STAGE>` from the MLflow registry.
+
+    Returns None (caller falls back to pickle) if MLflow isn't configured.
+    Raises if MLflow IS configured but the load fails — we'd rather fail
+    fast than silently serve a stale pickle in production.
+    """
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     model_name = os.getenv("MODEL_NAME")
     if not (tracking_uri and model_name):
         return None
-    try:
-        import mlflow.pyfunc
 
-        mlflow.set_tracking_uri(tracking_uri)
-        stage = os.getenv("MODEL_STAGE", "Production")
-        uri = f"models:/{model_name}/{stage}"
-        pipe = mlflow.pyfunc.load_model(uri)
-        return LoadedModel(pipeline=pipe, source="mlflow")
-    except Exception as exc:
-        print(f"[model_loader] MLflow load failed ({exc}); falling back to pickle")
-        return None
+    # TODO (member, Phase 2): when DistilBERT (or any non-sklearn model) is
+    # registered, switch to `mlflow.pyfunc.load_model` and adapt the call
+    # site in main.py to handle DataFrame input. For Phase 1 sklearn, the
+    # `mlflow.sklearn` loader returns the raw Pipeline — identical interface
+    # to the pickle fallback, so `pipe.predict([text])` works either way.
+    import mlflow
+    import mlflow.sklearn
+
+    mlflow.set_tracking_uri(tracking_uri)
+    stage = os.getenv("MODEL_STAGE", "Production")
+    # TODO (member): MLflow 2.9+ deprecated stages in favour of *aliases*.
+    # When bumping to MLflow >=3, switch to `models:/sentiment-baseline@production`
+    # and have the training DAG set the alias instead of transitioning stages.
+    uri = f"models:/{model_name}/{stage}"
+    pipe = mlflow.sklearn.load_model(uri)
+    return LoadedModel(pipeline=pipe, source="mlflow")
 
 
 def _load_pickle(path: Path) -> LoadedModel:

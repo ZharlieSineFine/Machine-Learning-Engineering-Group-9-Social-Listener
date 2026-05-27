@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel in-flight runs for the same ref when a new commit is pushed —
+# keeps the queue short and avoids billing for runs nobody will read.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- Static analysis. Cheap, runs first. ----
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff==0.15.14
+      - name: Lint
+        run: ruff check .
+
+  # ---- Unit tests + smoke tests. No services required. ----
+  # The integration suite needs Docker + Postgres + MinIO + MLflow and is
+  # exercised by the dedicated job (Step 13).
+  unit-tests:
+    name: Unit + smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            tests/requirements.txt
+            api/requirements.txt
+            dashboard/requirements.txt
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt
+          pip install -r dashboard/requirements.txt
+          pip install -r tests/requirements.txt
+
+      - name: Run unit + smoke tests
+        # Exclude tests/integration — those need the compose stack.
+        run: pytest tests/ --ignore=tests/integration -v
+
+  # ---- Smoke test inside the dedicated container (catches Dockerfile drift). ----
+  smoke-docker:
+    name: Smoke test (Docker image)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build smoke image
+        run: docker build -f infra/docker/smoke/Dockerfile -t sentiment-smoke .
+      - name: Run smoke tests in container
+        run: docker run --rm sentiment-smoke
+
+  # ---- Full end-to-end against the compose stack ----
+  # Brings up postgres + minio + mlflow (NOT airflow/api — those add 5+
+  # minutes of image build for no extra coverage; the integration tests
+  # exercise the python entrypoints directly).
+  compose-integration:
+    name: Compose integration (e2e)
+    runs-on: ubuntu-latest
+    needs: [lint, unit-tests]  # don't burn compose minutes on a broken branch
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
+
+      - name: Copy env
+        run: cp infra/.env.example .env
+
+      - name: Bring up infra subset
+        run: docker compose up -d postgres minio minio-init mlflow
+
+      - name: Wait for services
+        # postgres + minio have healthchecks; mlflow doesn't, so we poll.
+        run: |
+          set -euo pipefail
+          for svc in sentiment-postgres sentiment-minio; do
+            for _ in $(seq 1 60); do
+              state=$(docker inspect -f '{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "starting")
+              [ "$state" = "healthy" ] && break
+              sleep 2
+            done
+          done
+          for _ in $(seq 1 60); do
+            curl -sf http://localhost:5001/ >/dev/null && break
+            sleep 2
+          done
+
+      - name: Run integration tests (skip slow distilbert)
+        env:
+          POSTGRES_HOST_TEST: localhost
+          POSTGRES_PORT_TEST: "5432"
+        run: pytest tests/integration/ -v --tb=short
+
+      - name: Compose logs (on failure)
+        if: failure()
+        run: docker compose logs --tail=200

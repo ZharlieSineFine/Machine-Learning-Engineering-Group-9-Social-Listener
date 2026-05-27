@@ -20,6 +20,13 @@ x-airflow-common: &airflow-common
     MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    # Lets DAGs do `from data.ingest... import ...` / `from models... import ...`.
+    PYTHONPATH: /opt/project
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_HOST: ${POSTGRES_HOST}
+    POSTGRES_PORT: ${POSTGRES_PORT}
+    POSTGRES_DB: ${POSTGRES_DB}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
@@ -98,7 +105,11 @@ services:
       --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
       --default-artifact-root s3://mlflow/
     ports:
-      - "5000:5000"
+      # Host 5001 because macOS Control Center (AirPlay Receiver) owns
+      # port 5000 by default. Container-internal port stays 5000, so
+      # MLFLOW_TRACKING_URI=http://mlflow:5000 still works for services
+      # on the docker network.
+      - "5001:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -145,8 +156,12 @@ services:
     env_file: .env
     environment:
       MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       MODEL_NAME: ${MODEL_NAME}
       MODEL_STAGE: ${MODEL_STAGE}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
     ports:
       - "8000:8000"
     depends_on:
