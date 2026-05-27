@@ -1,0 +1,8 @@
+streamlit>=1.33
+requests>=2.31
+pandas>=2.2
+plotly>=5.20
+wordcloud>=1.9
+psycopg2-binary>=2.9
+sqlalchemy>=2.0
+mlflow>=2.10,<3
