@@ -1,18 +1,19 @@
 # Architecture — Brand Sentiment Analysis Platform
 
-> **One-line:** An end-to-end MLOps pipeline that ingests product reviews, classifies sentiment with a fine-tuned transformer, and serves predictions through a REST API and a dashboard — all reproducible with `docker compose up`.
+> **One-line:** A medallion-architecture MLOps pipeline that ingests restaurant reviews, refines them through Bronze → Silver → Gold layers, classifies sentiment with a fine-tuned transformer, and serves predictions through a shadow-deployed REST API and a Streamlit dashboard — all reproducible with `docker compose up`.
 
 ---
 
 ## 1. Goal
 
-Build a production-style sentiment analysis system for an online brand. The system should be:
+Build a production-style sentiment analysis system for online restaurant brand reviews. The system must be:
 
-- **End-to-end** — ingestion → training → registry → serving → monitoring → UI
+- **End-to-end** — sources → bronze → silver → gold → train → register → shadow serve → monitor → feedback
 - **Locally deployable** — every component runs in Docker on a developer laptop
-- **Cloud-portable (stretch)** — swap Postgres for RDS, MinIO for S3 and the same stack lifts to AWS/GCP/Azure
-- **Reproducible** — pinned dependencies, CI runs the same image set as local dev
-- **Thin-slice first** — get a working skeleton end-to-end before adding depth in any one layer
+- **Cloud-portable (stretch)** — swap Postgres → RDS, MinIO → S3 and the stack lifts to AWS/GCP/Azure
+- **Reproducible** — pinned dependencies; CI runs the same images as local dev
+- **Thin-slice first** — a working skeleton end-to-end before depth in any one layer
+- **Closed-loop** — drift detected by Evidently triggers retraining; human-corrected labels feed the next training run
 
 ---
 
@@ -20,164 +21,271 @@ Build a production-style sentiment analysis system for an online brand. The syst
 
 | Layer | Tool | Why |
 |---|---|---|
-| Orchestration | **Airflow** | Schedules ingestion, training, evaluation, drift checks |
-| Storage (metadata + features) | **Postgres** | Single source of truth for reviews, predictions, run metadata |
-| Object storage | **MinIO** | S3-compatible local store for raw datasets, model artifacts |
-| Modeling | **HuggingFace Transformers + scikit-learn** | DistilBERT fine-tuning; sklearn baseline + utilities |
+| Orchestration | **Airflow** | Schedules every step on a **6-hour batch cycle** |
+| Storage (metadata + features) | **Postgres** | Source of truth for reviews, predictions, run metadata |
+| Object storage | **MinIO** | S3-compatible local store for raw JSON, model artifacts, drift reports |
+| Modeling | **HuggingFace Transformers + scikit-learn** | DistilBERT fine-tune; sklearn baseline + utilities |
 | Topic modelling (stretch) | **BERTopic** | Theme extraction from negative reviews |
-| Experiment tracking + registry | **MLflow** | Logs runs, metrics, params; promotes models to `Staging` / `Production` |
-| Data validation | **Great Expectations** | Schema + value-range checks on ingested reviews |
-| Drift + performance monitoring | **Evidently** | Generates data/target drift reports per DAG run |
-| Serving | **FastAPI** | REST endpoint that pulls the `Production` model from MLflow registry |
-| Dashboard | **Streamlit** | KPI tiles, sentiment timelines, word-cloud, model comparison |
-| Tests | **pytest** | Unit + integration tests gating CI |
+| Experiment tracking + registry | **MLflow** | Logs runs, metrics, params; promotes models `None → Staging → Production` |
+| Data validation | **Great Expectations** | Schema + value-range checks between bronze → silver |
+| Drift + performance monitoring | **Evidently** | Data quality, model drift, prediction confidence — fires retraining when thresholds break |
+| Serving | **FastAPI** | REST endpoint; **shadow deploy** (candidate model runs alongside production for comparison before promotion) |
+| Dashboard | **Streamlit** | KPI tiles, sentiment timelines, alerts, digest |
+| Tests | **pytest** | Unit + integration; smoke container in compose |
 | CI/CD | **GitHub Actions** | Lint, test, build images, push to registry |
-| Containerisation | **Docker / Docker Compose** | One-command spin-up of the entire stack |
+| Containerisation | **Docker / Docker Compose** | One-command spin-up |
 
 ---
 
-## 3. High-Level Data Flow
+## 3. Data Flow — Medallion Architecture
+
+Airflow schedules every step on a **6-hour batch inference cycle**.
 
 ```
-                ┌─────────────────────┐
-                │   Product reviews   │   (Amazon / Yelp / app store dumps)
-                └──────────┬──────────┘
-                           │
-                  ┌────────▼────────┐
-                  │  Airflow: DAG 1 │   ingest_reviews.py
-                  │   Ingestion     │── writes raw → MinIO
-                  └────────┬────────┘── writes parsed → Postgres
-                           │
-                  ┌────────▼────────┐
-                  │ Great            │  schema + null + range checks
-                  │ Expectations     │  fails fast if data is malformed
-                  └────────┬────────┘
-                           │
-                  ┌────────▼────────┐
-                  │  Airflow: DAG 2 │   train_model.py
-                  │   Training      │── fine-tune DistilBERT on labelled reviews
-                  └────────┬────────┘── log metrics/params/artifact → MLflow
-                           │
-                  ┌────────▼────────┐
-                  │  MLflow Model   │   registers to "sentiment-distilbert"
-                  │   Registry      │   versions: None → Staging → Production
-                  └────────┬────────┘
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-      ┌───────▼────────┐        ┌───────▼────────┐
-      │   FastAPI      │        │  Airflow: DAG 3│
-      │   /predict     │        │  Evaluation +  │
-      │                │        │  Drift (Evidently)
-      │  loads "Prod"  │        │                │
-      │   model        │        │  blocks promote│
-      └───────┬────────┘        │  if drift > τ  │
-              │                 └────────────────┘
-      ┌───────▼────────┐
-      │   Streamlit    │  KPI tiles, sentiment over time,
-      │   Dashboard    │  word-cloud, model A/B compare
-      └────────────────┘
+   SOURCES                BRONZE              SILVER              GOLD
+┌───────────────┐    ┌───────────────┐   ┌───────────────┐   ┌───────────────────┐
+│ Yelp Open     │    │   Raw         │   │   Cleaned     │   │ Feature + Label   │
+│ Reviews       │───►│ Original JSON │──►│ • Validated   │──►│ Embeddings,       │
+│ Malaysia      │    │ + provenance  │   │ • Deduplicated│   │ aggregates,       │
+│ Restaurant    │    │               │   │ • PII-masked  │   │ sentiment labels  │
+│ Reviews       │    └───────────────┘   └───────────────┘   └────────┬──────────┘
+│ Replay        │                                                     │
+│ Simulator     │                                                     │
+└───────────────┘                                                     │
+                                                                      ▼
+                                         ┌────────────────────────────────────────┐
+                                         │  Train + Register   DistilBERT · MLflow│
+                                         │  Inference (shadow) FastAPI            │
+                                         │  Dashboard          Streamlit · alerts │
+                                         │  Monitoring         Evidently          │
+                                         └────────────────┬───────────────────────┘
+                                                          │
+                              ┌───────────────────────────┘
+                              ▼
+        MLOps Monitoring & Feedback Loop:
+        Evidently watches data quality, model drift, and prediction confidence.
+        Drift > threshold → retraining is triggered automatically.
+        Human-corrected labels feed the next training run.
 ```
+
+### Layer contracts (what each layer guarantees the next one)
+
+| Layer | Storage | Contract | Owner |
+|---|---|---|---|
+| **Sources** | external + `data/sample/reviews_sample.csv` (in repo, ~1k labelled rows for smoke + baseline) | JSON / CSV from upstream, no guarantees. Sample columns: `text, label, rating, source, restaurant, location` | Charlie + Ha |
+| **Bronze** | MinIO `s3://datasets/bronze/{source}/{date}/` | Untouched payload + `_ingested_at`, `_source` provenance fields. Append-only. | Charlie + Ha |
+| **Silver** | Postgres `reviews_silver` + MinIO `silver/` | Schema-validated (GE), deduplicated by `(source, restaurant, text-hash)`, PII-masked (email, phone, personal names) | Charlie + Ha |
+| **Gold** | Postgres `reviews_gold` + MinIO `gold/embeddings/` | Embeddings, rolling aggregates per restaurant/location, string sentiment labels (ground truth where the CSV has one; derived from `rating` otherwise; overridden by `human_corrections` when present — tagged via `label_source`) | Charlie + Ha → Van |
+
+### Replay simulator
+
+Lives in `data/ingest/replay.py`. Replays a fixed timeline of reviews into Bronze at configurable speed, so the team can:
+- Demo drift detection (poison a window with negative reviews → see Evidently fire)
+- Reproduce bugs deterministically
+- Smoke-test the whole pipeline in CI without external network calls
 
 ---
 
-## 4. Component Map
+## 4. Model Lifecycle — with Shadow Deploy
 
-Each box in image 1 maps to a folder in the repo. See [WORKFLOW.md](./WORKFLOW.md) for ownership.
+```
+   Gold ──► train_model ──► MLflow run ──► register model
+                                             │
+                                             ▼
+                                    ┌─────────────────┐
+                                    │ Stage: Staging  │
+                                    └────────┬────────┘
+                                             │ shadow deploy:
+                                             │ candidate predicts on
+                                             │ live traffic ALONGSIDE
+                                             │ Production. Predictions
+                                             │ are logged but NOT served.
+                                             ▼
+                              ┌──────────────────────────┐
+                              │  Compare candidate vs.   │
+                              │  Production over N hours │
+                              │  (F1, agreement rate,    │
+                              │   latency, error rate)   │
+                              └────────────┬─────────────┘
+                                           │
+                          gate passes?     │     gate fails?
+                          ┌────────────────┴────────────────┐
+                          ▼                                 ▼
+              Promote Staging → Production            Reject; keep Production
+                  (manual approval)                   (alert in dashboard)
+```
+
+The shadow window is **two 6-hour batch cycles by default** (12h) before promotion is considered.
+
+---
+
+## 5. Component Map
 
 ```
 mle_project/
-├── airflow/                  # DAGs + Airflow config         (Anh, Charlie, Ha)
+├── airflow/                      # DAGs + Airflow config         (Charlie, Ha; Anh on infra)
 │   ├── dags/
-│   │   ├── ingest_reviews.py
-│   │   ├── train_model.py
-│   │   └── evaluate_and_monitor.py
+│   │   ├── ingest_bronze.py      # Sources → Bronze         (6h)
+│   │   ├── refine_silver.py      # Bronze → Silver          (6h, GE-gated)
+│   │   ├── build_gold.py         # Silver → Gold            (6h)
+│   │   ├── train_model.py        # Gold → MLflow run        (daily)
+│   │   ├── shadow_score.py       # Candidate predicts on live (6h)
+│   │   └── evaluate_and_monitor.py  # Evidently drift + promotion gate (6h)
 │   └── plugins/
-├── api/                      # FastAPI service               (Amelia)
+├── api/                          # FastAPI service               (Amelia)
 │   ├── app/
 │   │   ├── main.py
 │   │   ├── schemas.py
-│   │   └── model_loader.py
-│   └── Dockerfile
-├── dashboard/                # Streamlit app                 (Amelia)
+│   │   ├── model_loader.py       # Loads Production + (optional) Staging
+│   │   └── shadow.py             # Logs Staging predictions alongside Prod
+│   └── Dockerfile (in infra/docker/api/)
+├── dashboard/                    # Streamlit                     (Amelia)
 │   ├── app.py
-│   └── Dockerfile
-├── models/                   # Training code + experiments   (Van, Amelia)
+│   └── pages/                    # KPIs, drift, alerts, digest, model comparison
+├── models/                       # Training code                 (Van + Amelia)
 │   ├── train.py
 │   ├── evaluate.py
-│   ├── baseline_sklearn.py
-│   └── distilbert_finetune.py
-├── data/                     # Ingestion + validation        (Charlie, Ha)
+│   ├── baseline_sklearn.py       # Phase 1
+│   ├── distilbert_finetune.py    # Phase 2
+│   └── embeddings.py             # Used by Gold layer
+├── data/                         # Medallion layers              (Charlie + Ha)
 │   ├── ingest/
-│   ├── expectations/         # Great Expectations suites
-│   └── schemas/
-├── monitoring/               # Evidently configs + reports   (Charlie, Ha)
-│   └── drift_checks.py
-├── infra/                    # Docker, compose, CI           (Anh)
+│   │   ├── yelp_loader.py
+│   │   ├── malaysia_loader.py
+│   │   └── replay.py             # Replay simulator
+│   ├── refine/
+│   │   ├── dedupe.py
+│   │   └── pii_mask.py
+│   ├── expectations/             # Great Expectations suites
+│   ├── schemas/                  # SQL DDL for *_silver, *_gold + Pydantic types
+│   └── sample/                   # Tiny in-repo seed for CI smoke
+├── monitoring/                   # Evidently + retraining trigger (Charlie + Ha)
+│   ├── drift_checks.py
+│   └── retrain_trigger.py        # Emits Airflow trigger when drift > τ
+├── infra/                        # Docker, compose, CI            (Anh)
 │   ├── docker/
 │   └── github-actions/
-├── tests/                    # pytest suites                 (all)
-├── notebooks/                # Exploration (not in CI)       (Van, Amelia)
+├── tests/                        # Integration                    (Amelia + all)
+├── notebooks/                    # Exploration (not in CI)
+├── scripts/                      # bootstrap, demo, reset
 ├── docker-compose.yml
-├── ARCHITECTURE.md           # this file
-├── WORKFLOW.md               # roles, phases, handoffs
+├── ARCHITECTURE.md
+├── WORKFLOW.md
 └── README.md
 ```
 
 ---
 
-## 5. Services in `docker-compose`
+## 6. Services in `docker-compose`
 
-| Service | Image (base) | Port | Depends on |
+| Service | Port | Profile | Depends on |
 |---|---|---|---|
-| `postgres` | `postgres:15` | 5432 | — |
-| `minio` | `minio/minio` | 9000 / 9001 | — |
-| `mlflow` | custom (mlflow + psycopg2 + boto3) | 5000 | postgres, minio |
-| `airflow-webserver` | custom (apache/airflow + project deps) | 8080 | postgres |
-| `airflow-scheduler` | same image | — | postgres |
-| `api` | custom (FastAPI) | 8000 | mlflow |
-| `dashboard` | custom (Streamlit) | 8501 | api, postgres |
-| `evidently` | runs inside Airflow DAGs (no standalone service) | — | — |
+| `postgres` | 5432 | default | — |
+| `minio` + `minio-init` | 9000 / 9001 | default | — |
+| `mlflow` | 5000 | default | postgres, minio-init |
+| `airflow-init` / `webserver` / `scheduler` | 8080 | default | postgres |
+| `api` | 8000 | default | mlflow |
+| `dashboard` | 8501 | default | api, postgres |
+| `smoke` | — | `smoke` (opt-in) | — |
 
-A single `docker compose up` brings the whole stack online.
-
----
-
-## 6. Model Lifecycle
-
-1. **Train** — Airflow `train_model` DAG kicks off `models/distilbert_finetune.py`, logs run to MLflow.
-2. **Register** — Best run (per held-out F1) is registered to MLflow Model Registry as `sentiment-distilbert`, stage `None`.
-3. **Validate** — `evaluate_and_monitor` DAG runs Evidently against a hold-out slice; if drift and F1 thresholds pass, the model is promoted to `Staging`.
-4. **Promote** — Manual approval (or CI gate) flips `Staging` → `Production`.
-5. **Serve** — FastAPI reads `models:/sentiment-distilbert/Production` on startup. A `/reload` admin endpoint can re-pull without restart.
-6. **Monitor** — Daily DAG produces Evidently HTML reports stored in MinIO; the dashboard embeds the latest.
+`docker compose up` brings the default stack online.
+`docker compose run --rm smoke` runs the isolated smoke test container.
 
 ---
 
-## 7. Environments
+## 7. Postgres Schema (canonical)
+
+The sample CSV at `data/sample/reviews_sample.csv` is the source of truth for column shape. Labels are **strings** (`negative | neutral | positive`) to match `models.baseline_sklearn.LABELS`. Ratings come in as 1.0–5.0 floats.
+
+```sql
+-- silver: cleaned, deduped, PII-masked
+reviews_silver (
+  id              BIGSERIAL PRIMARY KEY,
+  source          TEXT NOT NULL,        -- google | yelp | malaysia | replay
+  restaurant      TEXT,
+  location        TEXT,
+  text            TEXT NOT NULL,
+  rating          REAL,                  -- 1.0 .. 5.0
+  label           TEXT,                  -- 'negative' | 'neutral' | 'positive' (nullable until labelled)
+  ingested_at     TIMESTAMPTZ NOT NULL,
+  cleaned_at      TIMESTAMPTZ DEFAULT now()
+);
+-- Dedup key (whatever the loader produces); for sources without stable IDs,
+-- a hash of (source, restaurant, text, ingested_date) works.
+CREATE UNIQUE INDEX reviews_silver_dedup
+  ON reviews_silver (source, md5(restaurant || '|' || text));
+
+-- gold: features + labels (the training set)
+reviews_gold (
+  review_id       BIGINT PRIMARY KEY REFERENCES reviews_silver(id),
+  embedding       BYTEA,                 -- (or VECTOR(384) if pgvector enabled)
+  text_len        INT,
+  label           TEXT NOT NULL,         -- 'negative' | 'neutral' | 'positive'
+  label_source    TEXT NOT NULL,         -- 'ground_truth' | 'derived_from_rating' | 'model_v{n}' | 'human_correction'
+  built_at        TIMESTAMPTZ DEFAULT now()
+);
+
+predictions (
+  id              BIGSERIAL PRIMARY KEY,
+  review_id       BIGINT REFERENCES reviews_silver(id),
+  model_name      TEXT NOT NULL,
+  model_version   INT NOT NULL,
+  stage           TEXT NOT NULL,         -- 'Production' | 'Staging' (shadow)
+  label           TEXT NOT NULL,         -- 'negative' | 'neutral' | 'positive'
+  score           REAL,                  -- nullable (LinearSVC has no predict_proba)
+  predicted_at    TIMESTAMPTZ DEFAULT now()
+);
+
+monitoring_reports (
+  id              BIGSERIAL PRIMARY KEY,
+  ran_at          TIMESTAMPTZ DEFAULT now(),
+  report_path     TEXT NOT NULL,         -- s3://minio/monitoring/...
+  drift_score     REAL,
+  f1_macro        REAL,
+  passed_gate     BOOLEAN,
+  triggered_retrain BOOLEAN DEFAULT FALSE
+);
+
+human_corrections (
+  id              BIGSERIAL PRIMARY KEY,
+  review_id       BIGINT REFERENCES reviews_silver(id),
+  corrected_label TEXT NOT NULL,         -- 'negative' | 'neutral' | 'positive'
+  corrected_by    TEXT,
+  corrected_at    TIMESTAMPTZ DEFAULT now()
+);
+```
+
+The training DAG joins `reviews_gold` with `human_corrections` and prefers human labels when present — that's how the feedback loop closes. When `label` is missing in Silver, the Gold builder derives it from `rating` (`<=2 → negative`, `3 → neutral`, `>=4 → positive`) and tags `label_source='derived_from_rating'`.
+
+---
+
+## 8. Environments
 
 | Env | Where | Used for |
 |---|---|---|
 | Local dev | Docker Compose on laptop | Day-to-day development |
-| CI | GitHub Actions (same images) | Lint, unit + integration tests, build, push |
+| CI | GitHub Actions (same images) | Lint, unit, smoke container, integration |
 | Production (stretch) | Any cloud — swap Postgres → managed RDS, MinIO → S3 | Live demo |
 
-Every dependency is pinned (`requirements.txt` + `Dockerfile` base tags). CI uses the same compose stack as local, so "works on my machine" is the same as "works in CI."
+Every dependency is pinned. CI uses the same images as local. "Works on my machine" = "works in CI."
 
 ---
 
-## 8. Design Principles
+## 9. Design Principles
 
-- **Thin-slice first.** A trivial sklearn baseline served via FastAPI and shown on the dashboard is more valuable on day 7 than a perfectly-tuned DistilBERT that nobody can call. Depth comes after the skeleton is green end-to-end.
-- **Contracts between layers are explicit.** API request/response schemas live in `api/app/schemas.py` and are shared with the dashboard. DB schemas live in `data/schemas/`. Don't pass implicit dicts across team boundaries.
-- **Everything observable.** Every model run goes to MLflow; every DAG run leaves a trace; the dashboard surfaces what's live in prod right now.
-- **No secret hand-offs.** If two teammates need to share a value (model name, table name, bucket), it goes in `infra/.env.example`, not in chat.
+- **Thin-slice first.** A sklearn baseline served via FastAPI and shown on the dashboard is more valuable on day 7 than a perfectly tuned DistilBERT nobody can call. Depth comes after the skeleton is green.
+- **Medallion discipline.** Don't reach back into Bronze from Gold-side code. Each layer's owner publishes the next one. If you need new columns in Silver, propose it via PR; don't bypass.
+- **Contracts between layers are explicit.** Pydantic schemas in `api/app/schemas.py`, SQL DDL in `data/schemas/`. Don't pass implicit dicts across team boundaries.
+- **Everything observable.** MLflow logs every run; every DAG run leaves a trace; the dashboard surfaces what's live in prod right now.
+- **No secret hand-offs.** Shared values (model name, table name, bucket) belong in `infra/.env.example`, not in chat.
+- **The feedback loop is part of the system, not a stretch goal.** `human_corrections` exists in Phase 1 even if no one writes to it yet, so the training DAG already knows how to read it.
 
 ---
 
-## 9. Open Questions (resolve in week 1)
+## 10. Open Questions (resolve in week 1)
 
-- Which review dataset are we starting with — Amazon Reviews 2023, Yelp Open Dataset, or a smaller curated sample?
-- Sentiment labels — binary (pos/neg), ternary (pos/neu/neg), or 5-star?
-- Do we need multilingual support, or English-only for v1?
-- BERTopic on negative reviews is a stretch goal — confirm in/out of scope before sprint 2.
+- **Label scheme** — derive from stars (1–2 → neg, 3 → neu, 4–5 → pos) or use an external labelled set first?
+- **Embedding model** — `sentence-transformers/all-MiniLM-L6-v2` (384d) is a reasonable default; lock it in or evaluate alternatives?
+- **Shadow window length** — default 12h (2 cycles); is that long enough to detect a regression?
+- **BERTopic on negative reviews** — confirm in scope for Phase 2 vs. stretch
+- **Multilingual** — Malaysia Restaurant Reviews likely contain Malay; English-only filter for v1, or attempt multilingual sentiment from day one?

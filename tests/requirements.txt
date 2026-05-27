@@ -1,0 +1,14 @@
+# NOTE: The canonical smoke-test requirements live at
+#       infra/docker/smoke/requirements.txt — that's what the `smoke`
+#       compose service installs.
+#
+# This file is kept only for IDE convenience when running pytest directly
+# from a local venv (without Docker). Keep it loosely aligned with
+# infra/docker/smoke/requirements.txt; if they drift, infra/docker/smoke
+# wins.
+pandas>=2.2
+scikit-learn>=1.4
+fastapi>=0.110
+pydantic>=2.6
+httpx>=0.27
+pytest>=7.4
