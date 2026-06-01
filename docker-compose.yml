@@ -112,10 +112,10 @@ services:
       /bin/bash -c "
       airflow db migrate &&
       airflow users create
-        --username ${AIRFLOW_ADMIN_USER:-airflow}
-        --password ${AIRFLOW_ADMIN_PASSWORD:-airflow}
-        --firstname admin --lastname admin
-        --role Admin --email admin@example.com || true
+      --username ${AIRFLOW_ADMIN_USER:-airflow}
+      --password ${AIRFLOW_ADMIN_PASSWORD:-airflow}
+      --firstname admin --lastname admin
+      --role Admin --email admin@example.com || true
       "
     restart: "no"
 

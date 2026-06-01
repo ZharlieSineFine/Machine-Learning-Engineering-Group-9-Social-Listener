@@ -16,7 +16,7 @@ cp infra/.env.example .env
 docker compose up -d
 
 # 3. open the UIs
-#    Airflow      http://localhost:8080
+   Airflow      http://localhost:8080
 #    MLflow       http://localhost:5000
 #    FastAPI docs http://localhost:8000/docs
 #    Streamlit    http://localhost:8501
