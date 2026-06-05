@@ -21,6 +21,12 @@ Contract mapping:
     source      <- "yelp"
     restaurant  <- business.name             # join on business_id
     location    <- business.city (+ state)   # join on business_id
+    date        <- review.date               # extra 7th column (see note below)
+
+`date` (the Yelp review timestamp, ISO-sortable) is emitted as an extra 7th column
+for temporal / out-of-distribution test splits. It is NOT part of the shared 6-column
+contract, so downstream `ingest_reviews.load_and_validate` ignores it (it selects
+EXPECTED_COLUMNS) and the Great Expectations suite tolerates the extra column.
 
 Soft-cleaning (length/letter/null) is intentionally left to the existing
 `data.ingest.ingest_reviews.load_and_validate` + the Great Expectations gate, exactly as
@@ -58,6 +64,10 @@ SOURCE = "yelp"
 # BrewLeaf is a coffee/tea brand, so the default scope is café-like businesses.
 # Override with --categories (e.g. add "Restaurants") if the brand's scope is broader.
 DEFAULT_CATEGORIES = frozenset({"Coffee & Tea", "Cafes", "Coffeeshops"})
+
+# Output = the 6-column contract PLUS `date` (extra trailing column, for
+# temporal / OOD splits). Downstream ingest + GE tolerate the extra column.
+OUTPUT_COLUMNS = [*EXPECTED_COLUMNS, "date"]
 
 
 def _label(rating: float) -> str:
@@ -141,12 +151,13 @@ def load_yelp(
     limit: Optional[int] = None,
     location_with_state: bool = False,
 ) -> pd.DataFrame:
-    """Join Yelp reviews to businesses and return the 6-column contract DataFrame.
+    """Join Yelp reviews to businesses; return the contract columns plus `date`.
 
     Streams review.json; drops reviews whose business_id is not in the (filtered)
     business lookup or that lack usable text/stars. `limit` caps the number of *joined*
     rows (applied after the join), so `--n 300` yields 300 real rows even though most
-    reviews are filtered out.
+    reviews are filtered out. The trailing `date` column carries the Yelp review
+    timestamp (null if absent) for temporal / OOD splits.
     """
     lookup = build_business_lookup(business_path, categories, location_with_state)
 
@@ -172,12 +183,13 @@ def load_yelp(
                 "source": SOURCE,
                 "restaurant": name,
                 "location": location,
+                "date": review.get("date"),   # Yelp review timestamp; null if absent
             }
         )
         if limit is not None and len(rows) >= limit:
             break
 
-    return pd.DataFrame(rows, columns=EXPECTED_COLUMNS)
+    return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 
 
 def main() -> None:

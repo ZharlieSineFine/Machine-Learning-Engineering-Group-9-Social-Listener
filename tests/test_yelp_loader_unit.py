@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from data.ingest.ingest_reviews import EXPECTED_COLUMNS
@@ -27,17 +28,18 @@ def test_happy_path_join(tmp_path: Path):
         {"business_id": "b_gym",  "name": "Iron House", "city": "Austin", "state": "TX", "categories": "Gyms, Fitness"},
     ])
     rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b_cafe", "stars": 5, "text": "amazing latte and pastries"},
-        {"business_id": "b_gym",  "stars": 1, "text": "machines always broken here"},
+        {"business_id": "b_cafe", "stars": 5, "text": "amazing latte and pastries", "date": "2016-03-09"},
+        {"business_id": "b_gym",  "stars": 1, "text": "machines always broken here", "date": "2017-01-02"},
     ])
     df = load_yelp(rev, biz)
-    assert list(df.columns) == EXPECTED_COLUMNS
+    assert list(df.columns) == EXPECTED_COLUMNS + ["date"]   # contract + trailing date
     assert len(df) == 1                              # only the cafe review survives
     row = df.iloc[0]
     assert row["restaurant"] == "Bean There"
     assert row["location"] == "Austin"
     assert row["source"] == "yelp"
     assert row["text"] == "amazing latte and pastries"
+    assert row["date"] == "2016-03-09"
 
 
 def test_label_thresholds(tmp_path: Path):
@@ -131,6 +133,21 @@ def test_location_with_state(tmp_path: Path):
     ])
     assert load_yelp(rev, biz, location_with_state=False).iloc[0]["location"] == "Austin"
     assert load_yelp(rev, biz, location_with_state=True).iloc[0]["location"] == "Austin, TX"
+
+
+def test_date_extracted_for_ood_split(tmp_path: Path):
+    """`date` passes through (ISO-sortable) for temporal/OOD splits; null if absent."""
+    biz = _write_jsonl(tmp_path, "business.json", [
+        {"business_id": "b", "name": "Cafe", "city": "KL", "state": "WP", "categories": "Cafes"},
+    ])
+    rev = _write_jsonl(tmp_path, "review.json", [
+        {"business_id": "b", "stars": 5, "text": "great cortado here", "date": "2018-07-01 12:30:05"},
+        {"business_id": "b", "stars": 2, "text": "slow service today"},  # no date key
+    ])
+    df = load_yelp(rev, biz)
+    assert "date" in df.columns
+    assert df.iloc[0]["date"] == "2018-07-01 12:30:05"   # raw Yelp timestamp, sortable
+    assert pd.isna(df.iloc[1]["date"])                   # missing date -> null
 
 
 def test_validate_reviews_passes(tmp_path: Path):
