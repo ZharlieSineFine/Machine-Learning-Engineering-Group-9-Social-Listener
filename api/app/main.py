@@ -35,11 +35,16 @@ def health() -> HealthResponse:
 def predict(req: PredictRequest) -> PredictResponse:
     if _model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
+    
+    # Input validation
+    MAX_CHARS = 1000
+    if len(req.text) > MAX_CHARS:
+        raise HTTPException(status_code=422, detail=f"text exceeds {MAX_CHARS} character limit")
+    
+    cleaned = "".join(ch for ch in req.text if ch.isprintable())
+    if not cleaned.strip():
+        raise HTTPException(status_code=422, detail="text is empty after cleaning")
 
-    # TODO (member): add input validation/sanitisation here.
-    #   - reject text > N chars (DoS guard)
-    #   - strip control chars
-    #   - log-and-return for non-string input edge cases
     pred = _model.pipeline.predict([req.text])
     label = str(pred[0])
     return PredictResponse(label=label)
