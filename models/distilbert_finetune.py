@@ -86,14 +86,26 @@ def _encode_dataset(df: pd.DataFrame, tokenizer, max_length: int):
 
 
 def _compute_metrics(eval_pred) -> dict:
-    """Trainer-friendly compute_metrics — returns macro-F1 and accuracy."""
-    from sklearn.metrics import accuracy_score, f1_score
+    """Trainer-friendly compute_metrics — surge-oriented negative-class metrics."""
+    from sklearn.metrics import accuracy_score, classification_report, f1_score
 
     logits, labels = eval_pred
     preds = np.argmax(logits, axis=-1)
+    report = classification_report(
+        labels,
+        preds,
+        labels=list(LABEL2ID.values()),
+        target_names=LABELS,
+        output_dict=True,
+        zero_division=0,
+    )
+    neg = report["negative"]
     return {
         "accuracy": float(accuracy_score(labels, preds)),
         "f1_macro": float(f1_score(labels, preds, average="macro", zero_division=0)),
+        "f1_neg": float(neg["f1-score"]),
+        "precision_neg": float(neg["precision"]),
+        "recall_neg": float(neg["recall"]),
     }
 
 
