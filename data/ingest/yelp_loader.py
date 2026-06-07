@@ -1,48 +1,25 @@
-"""Yelp source adapter — normalise the Yelp open dataset into the review contract.
+"""Yelp source adapter — RAW Bronze ingestion from the Yelp Open Dataset.
 
-This is the Phase-2 Yelp loader referenced by data/README.md, ARCHITECTURE.md and
-WORKFLOW.md. Like `scripts/build_sample.py` (the Google/TripAdvisor adapter), it is
-*pure* — no DB, no Airflow imports — so it can be unit-tested in isolation and reused
-by a CLI, an Airflow DAG, or a notebook. The output is the same 6-column contract every
-layer downstream agrees on (see `data/ingest/ingest_reviews.EXPECTED_COLUMNS`).
+Bronze = the source's own records, verbatim, plus provenance. This adapter does NO join,
+NO label derivation, NO cleaning. It emits two raw tables exactly as they appear in the
+Yelp JSON, *selected* to the beverage business segment (a sourcing decision — BrewLeaf is a
+bubble-tea brand; see the proposal deck):
 
-Yelp ships one JSON object per line. Only two files are needed:
-    review.json   — review_id, user_id, business_id, stars, date, text, useful, funny, cool
-    business.json — business_id, name, city, state, categories, ... (the join target)
+    reviews.csv   <- review_id, user_id, business_id, stars, useful, funny, cool, text, date
+    business.csv  <- business_id, name, address, city, state, postal_code, stars, review_count, categories
 
-review.json has no restaurant name or location, so each review is JOINED to business.json
-on `business_id`. The join is also where we scope to BrewLeaf's segment (coffee/tea/café
-businesses) via `--categories`.
+Both get `_source` + `_ingested_at` provenance columns. The review `date` is the literal
+Yelp timestamp ("2018-07-07 22:09:11") copied straight through — never reformatted. The
+join (review.business_id -> business.name/city), label derivation, and any cleaning all live
+in the Silver refiner (`data/refine/build_silver.py`).
 
-Contract mapping:
-    text        <- review.text
-    rating      <- float(review.stars)
-    label       <- _label(rating)            # >=4 positive, ==3 neutral, <=2 negative
-    source      <- "yelp"
-    restaurant  <- business.name             # join on business_id
-    location    <- business.city (+ state)   # join on business_id
-    date        <- review.date               # extra 7th column (see note below)
-
-`date` (the Yelp review timestamp, ISO-sortable) is emitted as an extra 7th column
-for temporal / out-of-distribution test splits. It is NOT part of the shared 6-column
-contract, so downstream `ingest_reviews.load_and_validate` ignores it (it selects
-EXPECTED_COLUMNS) and the Great Expectations suite tolerates the extra column.
-
-Soft-cleaning (length/letter/null) is intentionally left to the existing
-`data.ingest.ingest_reviews.load_and_validate` + the Great Expectations gate, exactly as
-`build_sample.py` defers final cleaning. NOTE: a narrow category slice can come out skewed
-to a single sentiment class; the GE suite requires all three classes to be present, so
-widen `--categories` (e.g. add "Restaurants") if the gate complains.
-
-review.json is multi-GB, so it is streamed line-by-line and never loaded whole; only the
-(category-filtered) business lookup is held in memory.
+review.json is multi-GB, so it is streamed line-by-line — or straight out of the ~9 GB tar
+via `--from-tar` (`tarfile.extractfile`, nothing hits disk). Only the small beverage-business
+index is held in memory.
 
 Run:
-    python -m data.ingest.yelp_loader \\
-        --reviews /path/to/yelp/review.json \\
-        --business /path/to/yelp/business.json \\
-        --n 300 \\
-        --out /tmp/yelp_sample.csv
+    python -m data.ingest.yelp_loader --from-tar /path/to/yelp_dataset --out-dir data/bronze/yelp
+    python -m data.ingest.yelp_loader --reviews review.json --business business.json --out-dir data/bronze/yelp
 
 Owner: Charlie + Ha (Data & Eval).
 """
@@ -51,42 +28,44 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Set, Tuple
+from typing import Iterable, Iterator, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from data.ingest.ingest_reviews import EXPECTED_COLUMNS
+from data.ingest.ingest_reviews import INGESTED_AT_FIELD, SOURCE_FIELD, ingestion_partition_name, utc_now_iso
 
 ROOT = Path(__file__).resolve().parents[2]
-SEED_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
 
 SOURCE = "yelp"
-# BrewLeaf is a coffee/tea brand, so the default scope is café-like businesses.
-# Override with --categories (e.g. add "Restaurants") if the brand's scope is broader.
-DEFAULT_CATEGORIES = frozenset({"Coffee & Tea", "Cafes", "Coffeeshops"})
 
-# Output = the 6-column contract PLUS `date` (extra trailing column, for
-# temporal / OOD splits). Downstream ingest + GE tolerate the extra column.
-OUTPUT_COLUMNS = [*EXPECTED_COLUMNS, "date"]
+# BrewLeaf is a bubble-tea brand, so the default ingestion scope is the beverage segment:
+# coffee, tea, cafés, juice bars and bubble tea. Override with --categories to broaden
+# (e.g. add "Restaurants") or narrow. Pass --categories with no values to ingest everything.
+DEFAULT_CATEGORIES = frozenset({
+    "Coffee & Tea",
+    "Cafes",
+    "Coffeeshops",
+    "Coffee Roasteries",
+    "Bubble Tea",
+    "Juice Bars & Smoothies",
+    "Tea Rooms",
+})
+
+# Raw source fields kept in each Bronze table (values copied verbatim; provenance appended).
+REVIEW_FIELDS = ["review_id", "user_id", "business_id", "stars", "useful", "funny", "cool", "text", "date"]
+BUSINESS_FIELDS = ["business_id", "name", "address", "city", "state", "postal_code", "stars", "review_count", "categories"]
+REVIEW_BRONZE_COLUMNS = [*REVIEW_FIELDS, SOURCE_FIELD, INGESTED_AT_FIELD]
+BUSINESS_BRONZE_COLUMNS = [*BUSINESS_FIELDS, SOURCE_FIELD, INGESTED_AT_FIELD]
+
+# Member names inside the official Yelp Open Dataset tar archive.
+YELP_TAR_BUSINESS = "yelp_academic_dataset_business.json"
+YELP_TAR_REVIEW = "yelp_academic_dataset_review.json"
 
 
-def _label(rating: float) -> str:
-    # Canonical rule — keep in sync with scripts/build_sample.py:_label
-    if rating >= 4:
-        return "positive"
-    if rating <= 2:
-        return "negative"
-    return "neutral"
-
-
-# ---------- pure helpers (unit-testable) ----------
+# ---------- category scope (pure row selection — no value changes) ----------
 
 def _normalize_categories(raw) -> Set[str]:
-    """Coerce Yelp's `categories` field into a set of category tokens.
-
-    The live dataset stores a comma-separated string ("Coffee & Tea, Cafes, Food");
-    the documentation shows an array. Handle both, plus None/NaN.
-    """
+    """Coerce Yelp's `categories` field (CSV string or list) into a set of tokens."""
     if raw is None:
         return set()
     if isinstance(raw, str):
@@ -103,131 +82,223 @@ def _matches_categories(raw, wanted: Set[str]) -> bool:
     return bool(_normalize_categories(raw) & wanted)
 
 
+# ---------- streaming JSON-lines ----------
+
+def _iter_json_records(lines: Iterable[str]) -> Iterator[dict]:
+    """Yield one parsed object per line, skipping blank/malformed lines.
+
+    Works on any iterable of strings — a file handle, or a tar member streamed via
+    `tarfile.extractfile`, so review.json never hits disk.
+    """
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
 def _iter_jsonl(path: Path) -> Iterator[dict]:
-    """Yield one parsed object per line, skipping blank and malformed lines.
-
-    A generator so the multi-GB review.json is streamed, never loaded whole.
-    """
+    """Stream one parsed object per line from a JSON-lines file on disk."""
     with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        yield from _iter_json_records(fh)
 
 
-def build_business_lookup(
-    business_path: Path,
-    categories: Set[str],
-    location_with_state: bool = False,
-) -> Dict[str, Tuple[str, str]]:
-    """Stream business.json and return {business_id: (name, location)} for kept rows.
+# ---------- raw row collection (verbatim values) ----------
 
-    Only businesses whose categories intersect `categories` are kept (see
-    `_matches_categories`). ~150k businesses fit comfortably in memory.
+def _pick(record: dict, fields: List[str]) -> dict:
+    """Copy `fields` out of a record verbatim (missing keys -> None)."""
+    return {f: record.get(f) for f in fields}
+
+
+def build_business_index(
+    records: Iterable[dict], categories: Set[str]
+) -> Tuple[Set[str], List[dict]]:
+    """Return (beverage business_id set, raw business rows) for matching businesses.
+
+    Pure selection by category — every kept business field is copied verbatim.
     """
-    lookup: Dict[str, Tuple[str, str]] = {}
-    for biz in _iter_jsonl(business_path):
+    ids: Set[str] = set()
+    rows: List[dict] = []
+    for biz in records:
         if not _matches_categories(biz.get("categories"), categories):
             continue
         bid = biz.get("business_id")
         if not bid:
             continue
-        name = (biz.get("name") or "").strip()
-        city = (biz.get("city") or "").strip()
-        state = (biz.get("state") or "").strip()
-        location = f"{city}, {state}" if location_with_state and city and state else city
-        lookup[bid] = (name, location)
-    return lookup
+        ids.add(bid)
+        rows.append(_pick(biz, BUSINESS_FIELDS))
+    return ids, rows
 
 
-def load_yelp(
+def collect_reviews(
+    records: Iterable[dict], business_ids: Set[str], limit: Optional[int] = None
+) -> List[dict]:
+    """Return raw review rows whose business_id is in scope (verbatim — no cleaning).
+
+    Note: rows with null text or unusable stars are intentionally KEPT here — Bronze is a
+    faithful copy of the source; dropping invalid rows is Silver's job.
+    """
+    rows: List[dict] = []
+    for review in records:
+        if review.get("business_id") not in business_ids:
+            continue
+        rows.append(_pick(review, REVIEW_FIELDS))
+        if limit is not None and len(rows) >= limit:
+            break
+    return rows
+
+
+def _stamp(rows: List[dict], columns: List[str], ingested_at: str) -> pd.DataFrame:
+    """Build a Bronze frame from raw rows and append provenance columns."""
+    base = [c for c in columns if c not in (SOURCE_FIELD, INGESTED_AT_FIELD)]
+    df = pd.DataFrame(rows, columns=base)
+    df[SOURCE_FIELD] = SOURCE
+    df[INGESTED_AT_FIELD] = ingested_at
+    return df[columns]
+
+
+def extract_bronze_from_records(
+    review_records: Iterable[dict],
+    business_records: Iterable[dict],
+    categories: Set[str] = DEFAULT_CATEGORIES,
+    limit: Optional[int] = None,
+    ingested_at: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Core: (reviews_bronze, business_bronze) from parsed review + business records.
+
+    Builds the beverage-business index first (consuming `business_records`), then selects
+    reviews for those businesses. `ingested_at` is injectable for deterministic tests.
+    """
+    ingested_at = ingested_at or utc_now_iso()
+    ids, business_rows = build_business_index(business_records, categories)
+    review_rows = collect_reviews(review_records, ids, limit)
+    reviews_df = _stamp(review_rows, REVIEW_BRONZE_COLUMNS, ingested_at)
+    business_df = _stamp(business_rows, BUSINESS_BRONZE_COLUMNS, ingested_at)
+    return reviews_df, business_df
+
+
+def extract_bronze_from_paths(
     review_path: Path,
     business_path: Path,
     categories: Set[str] = DEFAULT_CATEGORIES,
     limit: Optional[int] = None,
-    location_with_state: bool = False,
-) -> pd.DataFrame:
-    """Join Yelp reviews to businesses; return the contract columns plus `date`.
+    ingested_at: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Stream extracted review.json + business.json from disk into Bronze frames."""
+    return extract_bronze_from_records(
+        _iter_jsonl(review_path), _iter_jsonl(business_path), categories, limit, ingested_at
+    )
 
-    Streams review.json; drops reviews whose business_id is not in the (filtered)
-    business lookup or that lack usable text/stars. `limit` caps the number of *joined*
-    rows (applied after the join), so `--n 300` yields 300 real rows even though most
-    reviews are filtered out. The trailing `date` column carries the Yelp review
-    timestamp (null if absent) for temporal / OOD splits.
+
+def extract_bronze_from_tar(
+    tar_path: Path,
+    categories: Set[str] = DEFAULT_CATEGORIES,
+    limit: Optional[int] = None,
+    ingested_at: Optional[str] = None,
+    business_member: str = YELP_TAR_BUSINESS,
+    review_member: str = YELP_TAR_REVIEW,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Stream the Yelp dataset straight from the official ~9 GB tar into Bronze frames.
+
+    business.json (~118 MB) is consumed first to build the beverage index, then review.json
+    (~5.3 GB) is streamed past — only the index is held in memory.
     """
-    lookup = build_business_lookup(business_path, categories, location_with_state)
+    import io
+    import tarfile
 
-    rows = []
-    for review in _iter_jsonl(review_path):
-        biz = lookup.get(review.get("business_id"))
-        if biz is None:
-            continue
-        text = review.get("text")
-        if text is None:
-            continue
-        try:
-            rating = float(review["stars"])
-        except (KeyError, TypeError, ValueError):
-            continue
+    ingested_at = ingested_at or utc_now_iso()
+    with tarfile.open(tar_path, "r") as tf:
+        biz_fp = tf.extractfile(business_member)
+        if biz_fp is None:
+            raise FileNotFoundError(f"{business_member!r} not found in {tar_path}")
+        with biz_fp:
+            ids, business_rows = build_business_index(
+                _iter_json_records(io.TextIOWrapper(biz_fp, encoding="utf-8")), categories
+            )
 
-        name, location = biz
-        rows.append(
-            {
-                "text": text,
-                "label": _label(rating),
-                "rating": rating,
-                "source": SOURCE,
-                "restaurant": name,
-                "location": location,
-                "date": review.get("date"),   # Yelp review timestamp; null if absent
-            }
-        )
-        if limit is not None and len(rows) >= limit:
-            break
+        rev_fp = tf.extractfile(review_member)
+        if rev_fp is None:
+            raise FileNotFoundError(f"{review_member!r} not found in {tar_path}")
+        with rev_fp:
+            review_rows = collect_reviews(
+                _iter_json_records(io.TextIOWrapper(rev_fp, encoding="utf-8")), ids, limit
+            )
 
-    return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+    reviews_df = _stamp(review_rows, REVIEW_BRONZE_COLUMNS, ingested_at)
+    business_df = _stamp(business_rows, BUSINESS_BRONZE_COLUMNS, ingested_at)
+    return reviews_df, business_df
+
+
+def bronze_partition_dir(out_dir: Path, ingestion_date: str) -> Path:
+    """Return ``<out_dir>/dt=YYYY-MM-DD`` for daily partitioned bronze."""
+    return out_dir / ingestion_partition_name(ingestion_date)
+
+
+def write_bronze_partition(
+    reviews_df: pd.DataFrame,
+    business_df: pd.DataFrame,
+    out_dir: Path,
+    ingestion_date: str,
+) -> tuple[Path, Path]:
+    """Write Yelp bronze CSVs under ``dt=<ingestion_date>``."""
+    part = bronze_partition_dir(out_dir, ingestion_date)
+    part.mkdir(parents=True, exist_ok=True)
+    reviews_path = part / "reviews.csv"
+    business_path = part / "business.csv"
+    reviews_df.to_csv(reviews_path, index=False)
+    business_df.to_csv(business_path, index=False)
+    return reviews_path, business_path
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Normalise the Yelp dataset (review.json + business.json) into the review contract CSV."
+        description="Ingest the Yelp beverage segment into RAW Bronze (reviews.csv + business.csv)."
     )
-    ap.add_argument("--reviews", type=Path, required=True, help="Path to Yelp review.json (JSON lines).")
-    ap.add_argument("--business", type=Path, required=True, help="Path to Yelp business.json (JSON lines).")
+    ap.add_argument(
+        "--from-tar",
+        type=Path,
+        default=None,
+        help="Path to the Yelp Open Dataset tar (streams business.json + review.json out of it).",
+    )
+    ap.add_argument("--reviews", type=Path, default=None, help="Path to extracted Yelp review.json (JSON lines).")
+    ap.add_argument("--business", type=Path, default=None, help="Path to extracted Yelp business.json (JSON lines).")
     ap.add_argument(
         "--categories",
         nargs="*",
         default=sorted(DEFAULT_CATEGORIES),
-        help="Business categories to keep. Pass --categories with no values to disable filtering.",
+        help="Business categories to keep (default: the beverage segment). Pass --categories with no values to ingest all.",
     )
-    ap.add_argument("--n", type=int, default=None, dest="limit", help="Cap the number of joined rows.")
-    ap.add_argument("--out", type=Path, required=True, help="Output CSV path (must not be the committed seed).")
+    ap.add_argument("--n", type=int, default=None, dest="limit", help="Cap the number of review rows.")
+    ap.add_argument("--out-dir", type=Path, required=True, help="Bronze root (writes dt=YYYY-MM-DD/ subdir).")
     ap.add_argument(
-        "--location-with-state",
-        action="store_true",
-        help='Format location as "City, ST" instead of just "City".',
+        "--ingestion-date",
+        type=str,
+        default=None,
+        help="Landing partition date (YYYY-MM-DD). Default: today UTC.",
     )
     args = ap.parse_args()
 
-    if args.out.resolve() == SEED_CSV.resolve():
-        raise SystemExit(f"Refusing to overwrite the committed seed CSV: {SEED_CSV}")
+    categories = set(args.categories)
+    if args.from_tar is not None:
+        reviews_df, business_df = extract_bronze_from_tar(args.from_tar, categories, args.limit)
+    elif args.reviews is not None and args.business is not None:
+        reviews_df, business_df = extract_bronze_from_paths(args.reviews, args.business, categories, args.limit)
+    else:
+        raise SystemExit("Provide either --from-tar <tar> or both --reviews <json> and --business <json>.")
 
-    df = load_yelp(
-        args.reviews,
-        args.business,
-        categories=set(args.categories),
-        limit=args.limit,
-        location_with_state=args.location_with_state,
+    from datetime import date
+
+    ingestion_date = args.ingestion_date or date.today().isoformat()
+    reviews_path, business_path = write_bronze_partition(
+        reviews_df, business_df, args.out_dir, ingestion_date
     )
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(args.out, index=False)
-    print(f"Wrote {len(df)} rows -> {args.out}")
-    print(df["label"].value_counts().to_string())
+    n_dated = int(reviews_df["date"].notna().sum())
+    print(f"Bronze reviews:  {len(reviews_df)} rows ({n_dated} with a date) -> {reviews_path}")
+    print(f"Bronze business: {len(business_df)} rows -> {business_path}")
 
 
 if __name__ == "__main__":

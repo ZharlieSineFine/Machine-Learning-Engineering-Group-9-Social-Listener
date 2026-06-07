@@ -1,168 +1,90 @@
-"""Unit tests for the pure Yelp source adapter.
+"""Unit tests for the RAW Yelp Bronze adapter (data/ingest/yelp_loader.py).
 
-No DB, no Airflow. Validates the review.json + business.json join, the
-category filter, label derivation, malformed-line handling, and that the
-output survives the existing Great Expectations gate.
+Bronze must be a faithful copy of the source: raw fields verbatim, the `date` passed through
+untouched, provenance appended, and NO label/join/cleaning (those are Silver's job and are
+tested in test_build_silver_unit.py). Category scoping is pure row selection.
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pandas as pd
-import pytest
 
-from data.ingest.ingest_reviews import EXPECTED_COLUMNS
-from data.ingest.yelp_loader import load_yelp
+from data.ingest.yelp_loader import (
+    BUSINESS_BRONZE_COLUMNS,
+    REVIEW_BRONZE_COLUMNS,
+    bronze_partition_dir,
+    build_business_index,
+    collect_reviews,
+    extract_bronze_from_records,
+    write_bronze_partition,
+)
 
-
-def _write_jsonl(tmp: Path, name: str, rows: list[dict]) -> Path:
-    p = tmp / name
-    p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
-    return p
-
-
-def test_happy_path_join(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b_cafe", "name": "Bean There", "city": "Austin", "state": "TX", "categories": "Coffee & Tea, Cafes"},
-        {"business_id": "b_gym",  "name": "Iron House", "city": "Austin", "state": "TX", "categories": "Gyms, Fitness"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b_cafe", "stars": 5, "text": "amazing latte and pastries", "date": "2016-03-09"},
-        {"business_id": "b_gym",  "stars": 1, "text": "machines always broken here", "date": "2017-01-02"},
-    ])
-    df = load_yelp(rev, biz)
-    assert list(df.columns) == EXPECTED_COLUMNS + ["date"]   # contract + trailing date
-    assert len(df) == 1                              # only the cafe review survives
-    row = df.iloc[0]
-    assert row["restaurant"] == "Bean There"
-    assert row["location"] == "Austin"
-    assert row["source"] == "yelp"
-    assert row["text"] == "amazing latte and pastries"
-    assert row["date"] == "2016-03-09"
+BIZ = [
+    {"business_id": "b_cafe", "name": "Bean There", "city": "Austin", "state": "TX",
+     "categories": "Coffee & Tea, Cafes", "review_count": 12},
+    {"business_id": "b_gym", "name": "Iron House", "city": "Austin", "state": "TX",
+     "categories": "Gyms, Fitness", "review_count": 3},
+]
+REV = [
+    {"business_id": "b_cafe", "stars": 5, "text": "amazing latte", "date": "2016-03-09 10:00:00", "review_id": "r1"},
+    {"business_id": "b_gym", "stars": 1, "text": "broken machines", "date": "2017-01-02 09:00:00", "review_id": "r2"},
+    {"business_id": "b_cafe", "stars": 3, "text": "ok flat white", "review_id": "r3"},  # no date key
+]
 
 
-def test_label_thresholds(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "KL", "state": "WP", "categories": "Cafes"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b", "stars": 5, "text": "excellent coffee here"},
-        {"business_id": "b", "stars": 4, "text": "pretty good espresso"},
-        {"business_id": "b", "stars": 3, "text": "average flat white today"},
-        {"business_id": "b", "stars": 2, "text": "weak and watery coffee"},
-        {"business_id": "b", "stars": 1, "text": "terrible burnt beans"},
-    ])
-    df = load_yelp(rev, biz)
-    assert list(df["label"]) == ["positive", "positive", "neutral", "negative", "negative"]
-    assert df["rating"].tolist() == [5.0, 4.0, 3.0, 2.0, 1.0]   # ints cast to float
+def test_bronze_columns_and_provenance():
+    reviews, business = extract_bronze_from_records(REV, BIZ, ingested_at="2026-06-06T00:00:00Z")
+    assert list(reviews.columns) == REVIEW_BRONZE_COLUMNS
+    assert list(business.columns) == BUSINESS_BRONZE_COLUMNS
+    # Bronze must NOT carry any Silver-derived columns.
+    assert "label" not in reviews.columns
+    assert "restaurant" not in reviews.columns
+    assert (reviews["_source"] == "yelp").all()
+    assert (reviews["_ingested_at"] == "2026-06-06T00:00:00Z").all()
+    assert (business["_ingested_at"] == "2026-06-06T00:00:00Z").all()
 
 
-def test_category_filter_drops_non_matching(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Steakhouse", "city": "KL", "state": "WP", "categories": "Steakhouses, Restaurants"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b", "stars": 5, "text": "great steak dinner"},
-    ])
-    assert len(load_yelp(rev, biz)) == 0                          # default café scope -> dropped
-    assert len(load_yelp(rev, biz, categories={"Restaurants"})) == 1  # widened scope -> kept
+def test_date_is_passed_through_verbatim():
+    reviews, _ = extract_bronze_from_records(REV, BIZ, ingested_at="t")
+    cafe = reviews[reviews["review_id"] == "r1"].iloc[0]
+    assert cafe["date"] == "2016-03-09 10:00:00"  # exact source string, not reformatted
+    no_date = reviews[reviews["review_id"] == "r3"].iloc[0]
+    assert pd.isna(no_date["date"])  # missing -> null, never invented
 
 
-def test_categories_str_list_none(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b_str",  "name": "StrCafe",  "city": "KL", "state": "WP", "categories": "Coffee & Tea, Food"},
-        {"business_id": "b_list", "name": "ListCafe", "city": "KL", "state": "WP", "categories": ["Cafes", "Bakeries"]},
-        {"business_id": "b_none", "name": "NoneCafe", "city": "KL", "state": "WP", "categories": None},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b_str",  "stars": 5, "text": "good drip coffee"},
-        {"business_id": "b_list", "stars": 4, "text": "nice cafe vibe here"},
-        {"business_id": "b_none", "stars": 3, "text": "no category at all"},
-    ])
-    df = load_yelp(rev, biz)
-    assert set(df["restaurant"]) == {"StrCafe", "ListCafe"}       # None category dropped
+def test_category_scope_selects_businesses_and_their_reviews():
+    reviews, business = extract_bronze_from_records(REV, BIZ, ingested_at="t")
+    # Only the café business is in scope, so only its reviews survive (gym review dropped).
+    assert set(business["business_id"]) == {"b_cafe"}
+    assert set(reviews["business_id"]) == {"b_cafe"}
+    assert set(reviews["review_id"]) == {"r1", "r3"}
 
 
-def test_join_miss_dropped(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "KL", "state": "WP", "categories": "Cafes"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b",     "stars": 5, "text": "lovely cafe spot"},
-        {"business_id": "ghost", "stars": 1, "text": "this business is unknown"},
-    ])
-    df = load_yelp(rev, biz)
-    assert len(df) == 1
-    assert df.iloc[0]["restaurant"] == "Cafe"
+def test_raw_rows_are_not_cleaned():
+    # A null-text review for an in-scope business is KEPT in Bronze (cleaning is Silver's job).
+    recs = [{"business_id": "b_cafe", "stars": 4, "text": None, "date": "2016-01-01", "review_id": "rx"}]
+    reviews, _ = extract_bronze_from_records(recs, BIZ, ingested_at="t")
+    assert len(reviews) == 1
+    assert pd.isna(reviews.iloc[0]["text"])
+    assert reviews.iloc[0]["stars"] == 4  # verbatim, not coerced to float/string
 
 
-def test_malformed_line_skipped(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "KL", "state": "WP", "categories": "Cafes"},
-    ])
-    rev_path = tmp_path / "review.json"
-    rev_path.write_text(
-        "\n".join([
-            json.dumps({"business_id": "b", "stars": 5, "text": "first valid review"}),
-            "this is not json at all {{{",
-            json.dumps({"business_id": "b", "stars": 1, "text": "second valid review"}),
-        ]),
-        encoding="utf-8",
-    )
-    df = load_yelp(rev_path, biz)
-    assert len(df) == 2                                          # garbage line skipped
+def test_build_business_index_returns_ids_and_raw_rows():
+    ids, rows = build_business_index(BIZ, {"Coffee & Tea", "Cafes"})
+    assert ids == {"b_cafe"}
+    assert rows[0]["name"] == "Bean There"  # raw business fields preserved
 
 
-def test_limit_caps_joined_rows(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "KL", "state": "WP", "categories": "Cafes"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b", "stars": 5, "text": f"review number {i} here"} for i in range(10)
-    ])
-    assert len(load_yelp(rev, biz, limit=3)) == 3
+def test_collect_reviews_respects_scope_and_limit():
+    ids = {"b_cafe"}
+    assert len(collect_reviews(REV, ids)) == 2
+    assert len(collect_reviews(REV, ids, limit=1)) == 1
+    assert collect_reviews(REV, set()) == []  # nothing in scope
 
 
-def test_location_with_state(tmp_path: Path):
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "Austin", "state": "TX", "categories": "Cafes"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b", "stars": 5, "text": "great spot in austin"},
-    ])
-    assert load_yelp(rev, biz, location_with_state=False).iloc[0]["location"] == "Austin"
-    assert load_yelp(rev, biz, location_with_state=True).iloc[0]["location"] == "Austin, TX"
-
-
-def test_date_extracted_for_ood_split(tmp_path: Path):
-    """`date` passes through (ISO-sortable) for temporal/OOD splits; null if absent."""
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "KL", "state": "WP", "categories": "Cafes"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b", "stars": 5, "text": "great cortado here", "date": "2018-07-01 12:30:05"},
-        {"business_id": "b", "stars": 2, "text": "slow service today"},  # no date key
-    ])
-    df = load_yelp(rev, biz)
-    assert "date" in df.columns
-    assert df.iloc[0]["date"] == "2018-07-01 12:30:05"   # raw Yelp timestamp, sortable
-    assert pd.isna(df.iloc[1]["date"])                   # missing date -> null
-
-
-def test_validate_reviews_passes(tmp_path: Path):
-    pytest.importorskip("great_expectations")
-    from data.expectations.reviews_suite import validate_reviews
-
-    biz = _write_jsonl(tmp_path, "business.json", [
-        {"business_id": "b", "name": "Cafe", "city": "Austin", "state": "TX", "categories": "Cafes"},
-    ])
-    rev = _write_jsonl(tmp_path, "review.json", [
-        {"business_id": "b", "stars": 5, "text": "absolutely delicious coffee and friendly staff"},
-        {"business_id": "b", "stars": 3, "text": "the espresso was fine but nothing memorable today"},
-        {"business_id": "b", "stars": 1, "text": "cold bitter coffee and very slow rude service"},
-    ])
-    df = load_yelp(rev, biz)
-    # check_language=False: Yelp is English and langdetect isn't needed at unit level.
-    result = validate_reviews(df, check_language=False)
-    assert result.success, result.failures
+def test_write_bronze_partition_lands_under_dt(tmp_path):
+    reviews, business = extract_bronze_from_records(REV, BIZ, ingested_at="2026-06-06T00:00:00Z")
+    out_dir = tmp_path / "yelp"
+    reviews_path, business_path = write_bronze_partition(reviews, business, out_dir, "2026-06-06")
+    assert reviews_path == bronze_partition_dir(out_dir, "2026-06-06") / "reviews.csv"
+    assert business_path.parent == reviews_path.parent
+    assert reviews_path.exists() and business_path.exists()

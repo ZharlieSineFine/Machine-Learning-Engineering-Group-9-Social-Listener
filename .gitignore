@@ -78,6 +78,17 @@ airflow/webserver_config.py
 # The smoke test uses data/sample/reviews_sample.csv (kept in repo).
 Malaysia Restaurant Review Datasets/
 
+# ---------- Medallion layer outputs (regenerated — not for git) ----------
+# Bronze = raw source rows + provenance. Silver/Gold = partitioned parquet.
+# Distribute large artifacts via Drive / release asset / S3 / DVC, not git.
+#   Bronze:  python -m data.run_daily --run-date YYYY-MM-DD
+#   Silver:  data/silver/reviews/review_date=*/part.parquet
+#   Gold:    data/gold/{feature_store,label_store}/review_date=*/part.parquet
+data/bronze/
+data/silver/
+data/gold/
+*.parquet
+
 # ---------- Great Expectations local state ----------
 data/expectations/uncommitted/
 

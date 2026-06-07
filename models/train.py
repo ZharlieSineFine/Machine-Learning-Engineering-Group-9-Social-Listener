@@ -41,10 +41,15 @@ DEFAULT_OUT = ROOT / "models" / "artifacts" / "baseline.pkl"
 @dataclass
 class TrainResult:
     artifact_path: str
-    f1_macro: float
-    f1_weighted: float
+    f1_macro: float        # in-time test
+    f1_weighted: float     # in-time test
     n_train: int
     n_test: int
+    n_val: int = 0
+    n_oot: int = 0
+    f1_macro_oot: Optional[float] = None    # out-of-time (None when no dated rows)
+    f1_weighted_oot: Optional[float] = None
+    cutoff_date: Optional[str] = None       # first OOT date
     mlflow_run_id: Optional[str] = None
 
 
@@ -62,8 +67,15 @@ def _try_log_mlflow(metrics: dict, artifact_path: Path) -> Optional[str]:
         with mlflow.start_run() as run:
             mlflow.log_metric("f1_macro", metrics["f1_macro"])
             mlflow.log_metric("f1_weighted", metrics["f1_weighted"])
-            mlflow.log_param("n_train", metrics["n_train"])
-            mlflow.log_param("n_test", metrics["n_test"])
+            # Out-of-time scores — the test-vs-OOT gap is the temporal-drift signal.
+            if metrics.get("f1_macro_oot") is not None:
+                mlflow.log_metric("f1_macro_oot", metrics["f1_macro_oot"])
+                mlflow.log_metric("f1_weighted_oot", metrics["f1_weighted_oot"])
+            for key in ("n_train", "n_val", "n_test", "n_oot"):
+                if key in metrics:
+                    mlflow.log_param(key, metrics[key])
+            if metrics.get("cutoff_date") is not None:
+                mlflow.log_param("oot_cutoff_date", metrics["cutoff_date"])
             mlflow.log_artifact(str(artifact_path), artifact_path="model")
             # TODO (member): register the model to the MLflow Model Registry
             # once F1 clears the promotion threshold. The API loads from
@@ -90,6 +102,11 @@ def run(data_path: Path = DEFAULT_DATA, out_path: Path = DEFAULT_OUT) -> TrainRe
         f1_weighted=metrics["f1_weighted"],
         n_train=metrics["n_train"],
         n_test=metrics["n_test"],
+        n_val=metrics.get("n_val", 0),
+        n_oot=metrics.get("n_oot", 0),
+        f1_macro_oot=metrics.get("f1_macro_oot"),
+        f1_weighted_oot=metrics.get("f1_weighted_oot"),
+        cutoff_date=metrics.get("cutoff_date"),
         mlflow_run_id=run_id,
     )
 
