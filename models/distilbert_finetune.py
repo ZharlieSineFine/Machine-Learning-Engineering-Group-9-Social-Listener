@@ -124,6 +124,9 @@ def train_distilbert(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if not {"text", "label"}.issubset(df.columns):
+        raise ValueError("df must have 'text' and 'label' columns")
+
     # Late imports — transformers+torch are heavy; only callers that need
     # this module pay the import cost.
     import torch
@@ -136,9 +139,6 @@ def train_distilbert(
     )
 
     torch.manual_seed(cfg.seed)
-
-    if not {"text", "label"}.issubset(df.columns):
-        raise ValueError("df must have 'text' and 'label' columns")
 
     train_df, eval_df = train_test_split(
         df, test_size=test_size, random_state=cfg.seed, stratify=df["label"]
