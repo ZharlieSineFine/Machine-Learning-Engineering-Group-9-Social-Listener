@@ -49,13 +49,6 @@ def predict(req: PredictRequest) -> PredictResponse:
     cleaned = "".join(ch for ch in req.text if ch.isprintable())
     if not cleaned.strip():
         raise HTTPException(status_code=422, detail="text is empty after cleaning")
-
-<<<<<<< HEAD
-=======
-    # TODO (member): input validation/sanitisation
-    #   - length cap (Pydantic min_length only; add max_length=10_000)
-    #   - strip control chars
->>>>>>> feature/full_flow
     pred = _model.pipeline.predict([req.text])
     return PredictResponse(label=str(pred[0]))
 
