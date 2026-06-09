@@ -97,6 +97,8 @@ def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
             sk_model=pipe,
             artifact_path="model",
             registered_model_name=model_name,
+            # Bundle preprocessing code so registry loads work outside the repo.
+            code_paths=[str(ROOT / "models")],
         )
         version = getattr(info, "registered_model_version", None)
         return run.info.run_id, str(version) if version else None
