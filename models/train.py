@@ -49,6 +49,10 @@ class TrainResult:
     artifact_path: str
     f1_macro: float
     f1_weighted: float
+    accuracy: float
+    f1_neg: float
+    precision_neg: float
+    recall_neg: float
     n_train: int
     n_test: int
     mlflow_run_id: Optional[str] = None
@@ -80,6 +84,10 @@ def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
         mlflow.log_metrics({
             "f1_macro": metrics["f1_macro"],
             "f1_weighted": metrics["f1_weighted"],
+            "accuracy": metrics["accuracy"],
+            "f1_neg": metrics["f1_neg"],
+            "precision_neg": metrics["precision_neg"],
+            "recall_neg": metrics["recall_neg"],
         })
 
         # log_model + register in one call. The new version lands at stage `None`;
@@ -89,6 +97,8 @@ def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
             sk_model=pipe,
             artifact_path="model",
             registered_model_name=model_name,
+            # Bundle preprocessing code so registry loads work outside the repo.
+            code_paths=[str(ROOT / "models")],
         )
         version = getattr(info, "registered_model_version", None)
         return run.info.run_id, str(version) if version else None
@@ -111,6 +121,10 @@ def run(data_path: Path = DEFAULT_DATA, out_path: Path = DEFAULT_OUT) -> TrainRe
         artifact_path=str(out_path),
         f1_macro=metrics["f1_macro"],
         f1_weighted=metrics["f1_weighted"],
+        accuracy=metrics["accuracy"],
+        f1_neg=metrics["f1_neg"],
+        precision_neg=metrics["precision_neg"],
+        recall_neg=metrics["recall_neg"],
         n_train=metrics["n_train"],
         n_test=metrics["n_test"],
         mlflow_run_id=run_id,
