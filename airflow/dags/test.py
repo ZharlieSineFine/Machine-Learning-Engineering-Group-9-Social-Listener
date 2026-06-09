@@ -1,9 +1,16 @@
 import os
+import sys
 from datetime import datetime
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from sqlalchemy import create_engine, text
+
+# The monitoring package is mounted at /opt/project/monitoring in the Airflow
+# image (see docker-compose volumes), which is not on sys.path by default.
+_PROJECT_ROOT = '/opt/project'
+if os.path.isdir(_PROJECT_ROOT) and _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 
 def greet():
@@ -44,6 +51,21 @@ def testing():
     print('Inserted dummy row!')
 
 
+def drift_check():
+    """Phase 1 Evidently wiring smoke task.
+
+    Runs the DataDriftPreset stub from ``monitoring/drift_checks.py`` on the
+    sample CSV vs. itself (no train data exists yet), so the monitoring slice
+    of the pipeline is exercised end-to-end inside Airflow. Always passes by
+    design — Phase 2 swaps in a real reference vs. last-7d current frame.
+    """
+    from monitoring.drift_checks import run_drift_check
+
+    result = run_drift_check()
+    print(f'Drift check ran: {result}')
+    # Phase 2: append this row to the `monitoring_reports` table.
+
+
 with DAG(
     dag_id='test',
     schedule='@daily',
@@ -54,5 +76,6 @@ with DAG(
 
     hello = PythonOperator(task_id='greet', python_callable=greet)
     dummy = PythonOperator(task_id='testing', python_callable=testing)
+    drift = PythonOperator(task_id='drift_check', python_callable=drift_check)
 
-    hello >> dummy
+    hello >> dummy >> drift
