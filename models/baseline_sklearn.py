@@ -24,7 +24,7 @@ from typing import Tuple
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.metrics import classification_report, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
@@ -122,19 +122,15 @@ def train(df: pd.DataFrame, test_size: float = 0.2, seed: int = 42) -> Tuple[Pip
 
     y_pred = pipe.predict(X_test)
 
-    report = classification_report(
-        y_test, y_pred, labels=LABELS, output_dict=True, zero_division=0
-    )
-    neg = report["negative"]
+    # TODO (member): expand the METRICS.
+    #   The MLflow registry promotion gate (Phase 2) will need at least
+    #   per-class precision/recall and a confusion matrix. Log them here
+    #   so models/train.py can forward them to MLflow without re-computing.
     metrics = {
         "f1_macro": float(f1_score(y_test, y_pred, average="macro")),
         "f1_weighted": float(f1_score(y_test, y_pred, average="weighted")),
-        "accuracy": float(accuracy_score(y_test, y_pred)),
-        "f1_neg": float(neg["f1-score"]),
-        "precision_neg": float(neg["precision"]),
-        "recall_neg": float(neg["recall"]),
         "n_train": int(len(X_train)),
         "n_test": int(len(X_test)),
-        "report": report,
+        "report": classification_report(y_test, y_pred, output_dict=True, zero_division=0),
     }
     return pipe, metrics
