@@ -7,7 +7,6 @@ import pytest
 from data.ingest.ingest_reviews import (
     FEATURE_STORE_COLUMNS,
     GOLD_COLUMNS,
-    LABEL_SOURCE_FIELD,
     LABEL_STORE_COLUMNS,
     REVIEW_ID_FIELD,
 )
@@ -27,6 +26,7 @@ def _silver_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "text": ["great", "ok", "bad"],
+            "text_len": [5, 2, 3],
             "rating": [5.0, 3.0, 1.0],
             "source": ["yelp", "yelp", "yelp"],
             "source_id": ["r1", "r2", "r3"],
@@ -49,7 +49,6 @@ def test_build_gold_derives_labels_from_rating():
     gold = build_gold(_silver_frame())
     assert list(gold.columns) == GOLD_COLUMNS
     assert list(gold["label"]) == ["positive", "neutral", "negative"]
-    assert (gold[LABEL_SOURCE_FIELD] == "derived_from_rating").all()
 
 
 def test_build_gold_from_silver_refiner_end_to_end():
@@ -70,7 +69,6 @@ def test_build_gold_from_silver_refiner_end_to_end():
     assert row["rating"] == 5.0
     assert row["label"] == "positive"
     assert row["restaurant"] == "Milktooth"
-    assert row[LABEL_SOURCE_FIELD] == "derived_from_rating"
 
 
 def test_feature_and_label_stores_keyed_by_review_id():

@@ -30,7 +30,6 @@ from data.ingest.ingest_reviews import (
     DATE_COLUMN,
     FEATURE_STORE_COLUMNS,
     GOLD_COLUMNS,
-    LABEL_SOURCE_FIELD,
     LABEL_STORE_COLUMNS,
     REVIEW_DATE_PARTITION,
     REVIEW_ID_FIELD,
@@ -67,7 +66,7 @@ def _event_date_for_row(row: pd.Series, partition_key: str) -> Optional[str]:
 
 
 def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
-    """Attach ``label`` + ``label_source`` to a Silver frame (legacy combined Gold CSV)."""
+    """Attach ``label`` to a Silver frame (legacy combined Gold CSV)."""
     missing = [c for c in SILVER_COLUMNS_WITH_DATE if c not in silver.columns]
     if missing:
         raise ValueError(f"silver frame is missing columns: {missing}")
@@ -78,14 +77,8 @@ def build_gold(silver: pd.DataFrame) -> pd.DataFrame:
         out["label"] = silver["label"]
         missing_label = out["label"].isna()
         out.loc[missing_label, "label"] = out.loc[missing_label, "rating"].map(label_from_rating)
-        if LABEL_SOURCE_FIELD in silver.columns:
-            out[LABEL_SOURCE_FIELD] = silver[LABEL_SOURCE_FIELD]
-        else:
-            out[LABEL_SOURCE_FIELD] = "ground_truth"
-        out.loc[missing_label, LABEL_SOURCE_FIELD] = "derived_from_rating"
     else:
         out["label"] = out["rating"].map(label_from_rating)
-        out[LABEL_SOURCE_FIELD] = "derived_from_rating"
 
     return out[GOLD_COLUMNS]
 
@@ -102,11 +95,6 @@ def build_feature_store(silver: pd.DataFrame, review_date_key: str) -> pd.DataFr
                 REVIEW_ID_FIELD: row["source_id"],
                 REVIEW_DATE_PARTITION: _event_date_for_row(row, review_date_key),
                 "text": row["text"],
-                "rating": row["rating"],
-                "source": row["source"],
-                "restaurant": row["restaurant"],
-                "location": row["location"],
-                "text_len": len(str(row["text"])),
             }
         )
     return pd.DataFrame(rows, columns=FEATURE_STORE_COLUMNS)
@@ -125,7 +113,6 @@ def build_label_store(silver: pd.DataFrame, review_date_key: str) -> pd.DataFram
                 REVIEW_ID_FIELD: row["source_id"],
                 REVIEW_DATE_PARTITION: _event_date_for_row(row, review_date_key),
                 "label": labels.loc[idx],
-                LABEL_SOURCE_FIELD: "derived_from_rating",
             }
         )
     return pd.DataFrame(rows, columns=LABEL_STORE_COLUMNS)
@@ -211,7 +198,6 @@ def main() -> None:
 
     print(f"Gold: {len(gold)} rows -> {args.out}")
     print(gold["label"].value_counts().to_string())
-    print(gold[LABEL_SOURCE_FIELD].value_counts().to_string())
 
 
 if __name__ == "__main__":

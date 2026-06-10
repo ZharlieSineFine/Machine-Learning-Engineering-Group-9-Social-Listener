@@ -117,12 +117,13 @@ Path: `data/bronze/tripadvisor/dt=<ingestion_date>/reviews.csv`
 ## Silver
 
 **File:** `data/silver/reviews/review_date=YYYY-MM-DD/part.parquet`  
-**Columns:** 8  
+**Columns:** 9  
 **Contract:** `SILVER_COLUMNS` + `date` + `_ingested_at` in `data/ingest/ingest_reviews.py`
 
 | Column | Dtype | Source mapping |
 |--------|-------|----------------|
 | `text` | `str` | Yelp `text` / TripAdvisor `Review` |
+| `text_len` | `int64` | Character length of `text` (computed in Silver refinement) |
 | `rating` | `float64` | Yelp `stars` / TripAdvisor `Rating` |
 | `source` | `str` | `"yelp"` or `"tripadvisor"` |
 | `source_id` | `str` | Yelp: `review_id`; TripAdvisor: SHA-256 of `(restaurant, text, parsed date)` |
@@ -142,6 +143,7 @@ Path: `data/bronze/tripadvisor/dt=<ingestion_date>/reviews.csv`
 | Field | Value |
 |-------|-------|
 | `text` | `The buffet Ramadhan has many varieties of food...` |
+| `text_len` | `52` |
 | `rating` | `4.0` |
 | `source` | `tripadvisor` |
 | `source_id` | `f0bc2e96d509ddd1...` (64-char hex) |
@@ -156,7 +158,7 @@ Path: `data/bronze/tripadvisor/dt=<ingestion_date>/reviews.csv`
 
 Gold splits **features** and **labels** into two parquet stores per `review_date`. Join on `review_id` (= Silver `source_id`).
 
-### `feature_store/part.parquet` (8 columns)
+### `feature_store/part.parquet` (3 columns)
 
 Path: `data/gold/feature_store/review_date=YYYY-MM-DD/part.parquet`
 
@@ -165,13 +167,8 @@ Path: `data/gold/feature_store/review_date=YYYY-MM-DD/part.parquet`
 | `review_id` | `str` | Canonical per-review key (= Silver `source_id`) |
 | `review_date` | `str` | ISO `YYYY-MM-DD` (normalised event date) |
 | `text` | `str` | Review body |
-| `rating` | `float64` | Star rating (1–5) |
-| `source` | `str` | `"yelp"` or `"tripadvisor"` |
-| `restaurant` | `str` | Venue name |
-| `location` | `str` | City / area |
-| `text_len` | `int64` | Character length of `text` |
 
-### `label_store/part.parquet` (4 columns)
+### `label_store/part.parquet` (3 columns)
 
 Path: `data/gold/label_store/review_date=YYYY-MM-DD/part.parquet`
 
@@ -180,7 +177,6 @@ Path: `data/gold/label_store/review_date=YYYY-MM-DD/part.parquet`
 | `review_id` | `str` | Same as `feature_store.review_id` |
 | `review_date` | `str` | ISO `YYYY-MM-DD` |
 | `label` | `str` | `positive`, `negative`, or `neutral` |
-| `label_source` | `str` | `derived_from_rating` |
 
 ### Label derivation rule
 
@@ -198,28 +194,22 @@ Implemented in `data/refine/build_gold.py` (`label_from_rating`).
 |-------|-------|-------|
 | feature_store | `review_id` | `7jB65y5k5Gg5-MPZnyqXNQ` |
 | feature_store | `review_date` | `2019-01-19` |
-| feature_store | `rating` | `3.0` |
-| feature_store | `text_len` | `469` |
+| feature_store | `text` | (review body) |
 | label_store | `label` | `neutral` |
-| label_store | `label_source` | `derived_from_rating` |
 
 ---
 
 ## Training handoff (for modelers)
 
-`models/train.py` and `models/splits.py` expect a flat table with at least:
+`models/train.py` and `models/splits.py` expect a flat table with at least `text`, `label`, and `date` (for out-of-time splits). Gold provides:
 
 | Column | Gold source |
 |--------|-------------|
 | `text` | `feature_store.text` |
 | `label` | `label_store.label` |
-| `rating` | `feature_store.rating` |
-| `source` | `feature_store.source` |
-| `restaurant` | `feature_store.restaurant` |
-| `location` | `feature_store.location` |
-| `date` | `feature_store.review_date` (for out-of-time splits) |
+| `date` | `feature_store.review_date` |
 
-Merge Gold stores on `review_id` (and `review_date` if needed), or export a single CSV for `python models/train.py --data <path>`.
+Merge Gold stores on `review_id` (and `review_date` if needed). For metadata (`rating`, `source`, `restaurant`, `location`), join back to Silver on `source_id` = `review_id`, or export a single combined CSV for `python models/train.py --data <path>`.
 
 Build Gold from existing Silver (if not already built):
 
@@ -237,8 +227,8 @@ python -m data.refine.build_gold --silver-root data/silver/reviews --gold-root d
 | Bronze Yelp `business.csv` | 11 |
 | Bronze TripAdvisor `reviews.csv` | 9 |
 | Silver `part.parquet` | 8 |
-| Gold `feature_store/part.parquet` | 8 |
-| Gold `label_store/part.parquet` | 4 |
+| Gold `feature_store/part.parquet` | 3 |
+| Gold `label_store/part.parquet` | 3 |
 
 ---
 

@@ -190,6 +190,7 @@ def refine_tripadvisor(bronze: pd.DataFrame) -> pd.DataFrame:
         },
         columns=SILVER_WRITE_COLUMNS,
     )
+    out["text_len"] = out["text"].astype(str).str.len()
     return out.reset_index(drop=True)
 
 
@@ -257,6 +258,7 @@ def refine_yelp(
         },
         columns=SILVER_WRITE_COLUMNS,
     )
+    out["text_len"] = out["text"].astype(str).str.len()
     return out.reset_index(drop=True)
 
 
@@ -267,6 +269,7 @@ def build_silver(frames: List[pd.DataFrame]) -> pd.DataFrame:
         return pd.DataFrame(columns=SILVER_COLUMNS_WITH_DATE)
     combined = pd.concat(valid, ignore_index=True)
     combined = dedup_silver(combined)
+    combined["text_len"] = combined["text"].astype(str).str.len()
     return combined[SILVER_COLUMNS_WITH_DATE]
 
 
@@ -317,6 +320,7 @@ def refine_bronze_frames(
         return pd.DataFrame(columns=SILVER_WRITE_COLUMNS)
     combined = pd.concat(frames, ignore_index=True)
     combined = dedup_silver(combined)
+    combined["text_len"] = combined["text"].astype(str).str.len()
     if recent_years is not None:
         combined = filter_recent_years_per_source(combined, recent_years)
     return combined
@@ -326,19 +330,9 @@ def assign_review_date_keys(df: pd.DataFrame) -> pd.Series:
     """Return a partition key per row from the harmonised ``date`` column."""
     if df.empty:
         return pd.Series(dtype=str)
-    keys: List[str] = []
-    for _, row in df.iterrows():
-        source = row.get("source")
-        raw = row.get(DATE_COLUMN)
-        if source == "yelp":
-            keys.append(partition_key_from_date(yelp_event_date(raw)))
-        elif source == "tripadvisor":
-            iso = raw if isinstance(raw, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw) else parse_review_date(raw)
-            keys.append(partition_key_from_date(iso))
-        else:
-            iso = raw if isinstance(raw, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw) else None
-            keys.append(partition_key_from_date(iso))
-    return pd.Series(keys, index=df.index)
+    ts = silver_row_timestamps(df)
+    keys = ts.dt.strftime("%Y-%m-%d")
+    return keys.where(ts.notna(), NULL_REVIEW_DATE_PARTITION)
 
 
 def merge_silver_partition(
@@ -414,10 +408,16 @@ def process_ingestion_to_silver(
 
     affected: Set[str] = set()
     keys = assign_review_date_keys(incoming)
-    for review_date_key in sorted(keys.unique()):
+    incoming = incoming.assign(__partition_key=keys)
+    for review_date_key, group in incoming.groupby("__partition_key", sort=True):
         path = silver_partition_path(silver_root, review_date_key)
         existing = read_silver_partition(path)
-        merged = merge_silver_partition(existing, incoming, review_date_key)
+        partition_rows = group.drop(columns=["__partition_key"])
+        if existing.empty:
+            merged = partition_rows
+        else:
+            merged = pd.concat([existing, partition_rows], ignore_index=True)
+        merged = dedup_silver(merged)
         write_silver_partition(merged, path)
         affected.add(review_date_key)
     return affected

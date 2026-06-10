@@ -240,15 +240,15 @@ Per-review stores keyed by `review_id` (= Silver `source_id`):
 
 
 
-**feature_store:** `review_id`, `review_date`, `text`, `rating`, `source`, `restaurant`, `location`, `text_len`
+**feature_store:** `review_id`, `review_date`, `text`
 
 
 
-**label_store:** `review_id`, `review_date`, `label`, `label_source`
+**label_store:** `review_id`, `review_date`, `label`
 
 
 
-Label rule: `rating <= 2 → negative`, `rating == 3 → neutral`, `rating >= 4 → positive`, tagged `label_source='derived_from_rating'`.
+Label rule: `rating <= 2 → negative`, `rating == 3 → neutral`, `rating >= 4 → positive` (derived in `build_gold.py` from Silver `rating`).
 
 
 

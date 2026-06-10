@@ -108,6 +108,7 @@ def test_build_silver_concatenates_sources():
     a = pd.DataFrame(
         {
             "text": ["x"],
+            "text_len": [1],
             "rating": [5.0],
             "source": ["yelp"],
             "source_id": ["r1"],
@@ -127,6 +128,7 @@ def test_filter_recent_years_per_source_uses_each_source_max():
     df = pd.DataFrame(
         {
             "text": ["a", "b", "c", "d", "e"],
+            "text_len": [1, 1, 1, 1, 1],
             "rating": [5.0] * 5,
             "source": ["yelp", "yelp", "yelp", "tripadvisor", "tripadvisor"],
             "source_id": ["y1", "y2", "y3", "t1", "t2"],
@@ -174,6 +176,7 @@ def test_dedup_keeps_latest_ingested_at():
     df = pd.DataFrame(
         {
             "text": ["old", "new"],
+            "text_len": [3, 3],
             "rating": [3.0, 5.0],
             "source": ["yelp", "yelp"],
             "source_id": ["r1", "r1"],
@@ -269,6 +272,22 @@ def test_assign_review_date_keys():
     )
     keys = assign_review_date_keys(df)
     assert list(keys) == ["2016-03-09", "2022-02-06"]
+
+
+def test_refine_yelp_sets_text_len():
+    reviews = pd.DataFrame(
+        {
+            "review_id": ["r1"],
+            "business_id": ["b"],
+            "stars": [5],
+            "text": ["hello"],
+            "date": ["2020-01-01"],
+            "_ingested_at": ["t"],
+        }
+    )
+    business = pd.DataFrame({"business_id": ["b"], "name": ["Cafe"], "city": ["Austin"]})
+    out = refine_yelp(reviews, business)
+    assert out.iloc[0]["text_len"] == 5
 
 
 def test_silver_passes_great_expectations_gate():

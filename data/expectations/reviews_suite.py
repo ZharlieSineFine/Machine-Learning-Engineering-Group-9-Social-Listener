@@ -47,6 +47,11 @@ def validate_silver(df: pd.DataFrame, *, check_language: bool = True) -> Validat
         "text length 1–5000",
         ds.expect_column_value_lengths_to_be_between("text", min_value=1, max_value=5000),
     )
+    _run("text_len not null", ds.expect_column_values_to_not_be_null("text_len"))
+    _run(
+        "text_len 1–5000",
+        ds.expect_column_values_to_be_between("text_len", min_value=1, max_value=5000),
+    )
     _run(
         "source in allowed set",
         ds.expect_column_values_to_be_in_set("source", value_set=sorted(VALID_SOURCES)),

@@ -6,7 +6,7 @@ Layer shapes:
   `date`, stable `source_id`. **No derived labels** — Silver carries `rating` only.
 * `EXPECTED_COLUMNS` — the 6-column **training contract** (includes `label`). Produced
   by the Gold builder (`data/refine/build_gold.py`), not Silver.
-* `GOLD_COLUMNS` — training contract + ISO `date` + `label_source` provenance.
+* `GOLD_COLUMNS` — training contract + ISO `date`.
 
 The **Bronze** layer has no single fixed schema: each adapter writes its source's own
 columns verbatim plus `_source` / `_ingested_at`. Harmonisation to Silver happens in
@@ -22,6 +22,7 @@ from typing import List
 # Silver: cleaned/joined reviews — rating yes, label no.
 SILVER_COLUMNS: List[str] = [
     "text",
+    "text_len",
     "rating",
     "source",
     "source_id",
@@ -55,27 +56,19 @@ EXPECTED_COLUMNS: List[str] = [
     "location",
 ]
 
-LABEL_SOURCE_FIELD: str = "label_source"
-
-GOLD_COLUMNS: List[str] = [*EXPECTED_COLUMNS, DATE_COLUMN, LABEL_SOURCE_FIELD]
+GOLD_COLUMNS: List[str] = [*EXPECTED_COLUMNS, DATE_COLUMN]
 
 # Per-review Gold store column contracts.
 FEATURE_STORE_COLUMNS: List[str] = [
     REVIEW_ID_FIELD,
     REVIEW_DATE_PARTITION,
     "text",
-    "rating",
-    "source",
-    "restaurant",
-    "location",
-    "text_len",
 ]
 
 LABEL_STORE_COLUMNS: List[str] = [
     REVIEW_ID_FIELD,
     REVIEW_DATE_PARTITION,
     "label",
-    LABEL_SOURCE_FIELD,
 ]
 
 # Provenance columns every Bronze adapter appends to the raw source rows.
