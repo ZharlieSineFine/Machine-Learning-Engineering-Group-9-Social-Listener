@@ -94,3 +94,38 @@ data/expectations/uncommitted/
 
 # ---------- Evidently HTML reports ----------
 monitoring/reports/
+
+# ---------- Streamlit local state ----------
+# Allow committing dashboard config (theme, layout) but never secrets.
+.streamlit/secrets.toml
+
+# ---------- HuggingFace / transformers cache when redirected into the repo ----------
+# By default this lives at ~/.cache/huggingface, but HF_HOME / TRANSFORMERS_CACHE
+# can point it here. A single DistilBERT checkpoint is ~250 MB — keep it out.
+hf_cache/
+.cache/
+transformers_cache/
+.huggingface/
+
+# ---------- Experiment tracking artefacts (W&B, TensorBoard, Lightning) ----------
+# Not used yet, but cheap to pre-empt if a teammate plugs them in for Phase 2.
+wandb/
+tensorboard_logs/
+tb_logs/
+lightning_logs/
+
+# ---------- Local databases (SQLite prototypes, etc.) ----------
+*.sqlite
+*.sqlite3
+*.db
+
+# ---------- Docker compose local overrides ----------
+# Per-developer tweaks (port remaps, mounted code) go in an override file
+# that Compose merges automatically — never commit those.
+docker-compose.override.yml
+docker-compose.*.local.yml
+
+# ---------- Type-checker / benchmark caches ----------
+.pyre/
+.pytype/
+.benchmarks/

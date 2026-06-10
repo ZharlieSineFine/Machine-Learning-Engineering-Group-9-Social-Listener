@@ -1,0 +1,38 @@
+# Project-level config. Currently only used to hold ruff settings — we keep
+# pyproject.toml as the single source of truth so editor integrations
+# (VS Code "Ruff" extension, PyCharm inspection) pick the same rules.
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [
+    "notebooks",
+    "models/artifacts",
+    "Malaysia Restaurant Review Datasets",
+    "data/sample",
+    "infra/docker",
+    ".venv",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+# Light Phase-1 ruleset. Tighten in Phase 3 (Step 13 lands E501 + I + UP).
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # long lines — we handle this with line-length above, but allow exceptions
+    "E402",  # module level imports — train.py mutates sys.path before importing
+    "E741",  # ambiguous variable names (l, I, O) — never an issue in our code
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401"]  # tests sometimes import-and-don't-use for fixture side effects
+"airflow/dags/**" = ["F401"]  # DAG files may import for side effects (operator registration)
+
+[tool.pytest.ini_options]
+markers = [
+    # "slow" = tests that take >30s (DistilBERT training, full compose boot).
+    # CI skips them by default with `-m "not slow"`. Enable explicitly with
+    # `pytest -m slow` or `RUN_SLOW=1 pytest`.
+    "slow: longer-running tests, opt-in",
+]

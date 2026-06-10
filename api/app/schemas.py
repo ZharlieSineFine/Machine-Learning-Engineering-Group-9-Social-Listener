@@ -7,9 +7,9 @@ Owner: Amelia.
 """
 from __future__ import annotations
 
-from typing import List
-
 from pydantic import BaseModel, Field
+
+MAX_BATCH_SIZE = 256
 
 
 class PredictRequest(BaseModel):
@@ -23,7 +23,24 @@ class PredictResponse(BaseModel):
     # CalibratedClassifierCV). Field name suggestion: `probabilities: dict[str, float]`.
 
 
+class BatchPredictRequest(BaseModel):
+    texts: list[str] = Field(
+        ..., min_length=1, max_length=MAX_BATCH_SIZE,
+        description=f"1..{MAX_BATCH_SIZE} review texts to classify",
+    )
+
+
+class BatchPredictResponse(BaseModel):
+    labels: list[str] = Field(..., description="One label per input text, in order")
+
+
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_source: str  # 'pickle' | 'mlflow' | 'none'
+
+
+class ReloadResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    model_source: str
