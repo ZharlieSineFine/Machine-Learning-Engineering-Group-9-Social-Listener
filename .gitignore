@@ -129,3 +129,4 @@ docker-compose.*.local.yml
 .pyre/
 .pytype/
 .benchmarks/
+.cursor/plans/docker_data_pipeline_3a738118.plan.md
