@@ -7,12 +7,19 @@
 # Phase 1 ships with: postgres, minio, mlflow, airflow, api, dashboard.
 # Each service Dockerfile lives in infra/docker/<service>/Dockerfile.
 
+x-pipeline-env: &pipeline-env
+  # Container paths — match the raw-data volume targets above.
+  YELP_TAR_PATH: /data/raw/yelp/yelp_dataset/yelp_dataset
+  TRIPADVISOR_CSV_PATH: /data/raw/tripadvisor/TripAdvisor_data_cleaned.csv
+  PYTHONPATH: /opt/project
+
 x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: infra/docker/airflow/Dockerfile
   env_file: .env
   environment:
+    <<: *pipeline-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -20,8 +27,6 @@ x-airflow-common: &airflow-common
     MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-    # Lets DAGs do `from data.ingest... import ...` / `from models... import ...`.
-    PYTHONPATH: /opt/project
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     POSTGRES_HOST: ${POSTGRES_HOST}
@@ -33,6 +38,8 @@ x-airflow-common: &airflow-common
     - ./models:/opt/project/models
     - ./data:/opt/project/data
     - ./monitoring:/opt/project/monitoring
+    - ${YELP_DATA_HOST:-../../Yelp_JSON}:/data/raw/yelp:ro
+    - ${TRIPADVISOR_DATA_HOST:-../../TripAdvisor_data_cleaned.csv}:/data/raw/tripadvisor:ro
   depends_on:
     postgres:
       condition: service_healthy
@@ -198,6 +205,23 @@ services:
       dockerfile: infra/docker/smoke/Dockerfile
     container_name: sentiment-smoke
     profiles: ["smoke"]
+
+  data-pipeline:
+    # Medallion driver: bronze → silver → GE gate → gold.
+    # Does NOT start with `docker compose up` — run on demand:
+    #   docker compose run --rm data-pipeline --run-date 2026-06-10 --sources yelp tripadvisor
+    #   .\scripts\run_daily_docker.ps1
+    build:
+      context: .
+      dockerfile: infra/docker/data-pipeline/Dockerfile
+    env_file: .env
+    environment:
+      <<: *pipeline-env
+    volumes:
+      - ./data:/opt/project/data
+      - ${YELP_DATA_HOST:-../../Yelp_JSON}:/data/raw/yelp:ro
+      - ${TRIPADVISOR_DATA_HOST:-../../TripAdvisor_data_cleaned.csv}:/data/raw/tripadvisor:ro
+    profiles: ["pipeline"]
 
 volumes:
   pg_data:
