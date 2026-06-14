@@ -145,6 +145,9 @@ def list_mlflow_runs(
                 "model_type": r.data.params.get("model_type"),
                 "f1_macro": r.data.metrics.get("f1_macro"),
                 "f1_weighted": r.data.metrics.get("f1_weighted"),
+                "recall_neg": r.data.metrics.get("recall_neg"),
+                "precision_neg": r.data.metrics.get("precision_neg"),
+                "f1_neg": r.data.metrics.get("f1_neg"),
                 "n_train": r.data.params.get("n_train"),
             })
         return pd.DataFrame(rows)

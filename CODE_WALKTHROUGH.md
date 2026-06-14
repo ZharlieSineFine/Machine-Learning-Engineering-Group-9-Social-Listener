@@ -39,6 +39,7 @@ flowchart TB
 
   subgraph ML
     MLF[MLflow Server<br/>tracking + registry]
+
     TRAIN[models/train.py]
   end
 

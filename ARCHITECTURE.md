@@ -197,7 +197,7 @@ mle_project/
 |---|---|---|---|
 | `postgres` | 5432 | default | — |
 | `minio` + `minio-init` | 9000 / 9001 | default | — |
-| `mlflow` | 5000 | default | postgres, minio-init |
+| `mlflow` | 5001 (host) → 5000 (container) | default | postgres, minio-init |
 | `airflow-init` / `webserver` / `scheduler` | 8080 | default | postgres |
 | `api` | 8000 | default | mlflow |
 | `dashboard` | 8501 | default | api, postgres |

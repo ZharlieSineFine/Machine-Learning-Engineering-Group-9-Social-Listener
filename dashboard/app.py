@@ -132,7 +132,10 @@ def render_mlflow_ab() -> None:
         st.info("No MLflow runs found (set MLFLOW_TRACKING_URI and train a model).")
         return
     st.dataframe(
-        runs[["start_time", "experiment", "model_type", "f1_macro", "f1_weighted", "n_train"]],
+        runs[[
+            "start_time", "experiment", "model_type",
+            "recall_neg", "f1_neg", "precision_neg", "f1_macro", "n_train",
+        ]],
         use_container_width=True,
     )
 

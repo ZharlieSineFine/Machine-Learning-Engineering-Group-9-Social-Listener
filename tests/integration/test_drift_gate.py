@@ -1,10 +1,10 @@
-"""Integration test for Step 10 — drift+F1 gate against real services.
+"""Integration test for Step 10 — drift + recall_neg gate against real services.
 
 Verifies:
     1. Happy path: stable data, real production model → not blocked, no raise.
-    2. Poisoned current: relabel all rows to one class → real model's F1
-       drops below the 3% threshold → PromotionBlocked raised, but the HTML
-       report IS still uploaded to MinIO (forensics).
+    2. Poisoned current: relabel all rows to one class → real model's
+       recall_neg drops below the 3% threshold → PromotionBlocked raised,
+       but the HTML report IS still uploaded to MinIO (forensics).
 """
 from __future__ import annotations
 
@@ -81,21 +81,21 @@ def test_gate_does_not_block_on_stable_data(production_model, minio_client, writ
         model=production_model,
         raise_on_block=False,
     )
-    assert result["reference_f1"] is not None and result["reference_f1"] > 0
-    assert result["current_f1"] is not None and result["current_f1"] > 0
+    assert result["reference_recall_neg"] is not None and result["reference_recall_neg"] > 0
+    assert result["current_recall_neg"] is not None and result["current_recall_neg"] > 0
     assert result["blocked_promotion"] is False
     _cleanup_minio_key(minio_client, result["s3_url"])
 
 
 def test_gate_blocks_on_poisoned_current(production_model, minio_client, write_conn):
-    """Relabel all current rows to 'negative' so the model's F1 collapses."""
+    """Relabel all current rows to 'negative' so recall_neg collapses."""
     df = pd.read_csv(SAMPLE_CSV)[["text", "label", "rating", "source"]].dropna()
     cut = int(len(df) * 0.8)
     ref = df.iloc[:cut].reset_index(drop=True)
     cur = df.iloc[cut:].copy().reset_index(drop=True)
     cur["label"] = "negative"  # poison the labels — model will look terrible
 
-    with pytest.raises(PromotionBlocked, match=r"f1_drop|drift_score"):
+    with pytest.raises(PromotionBlocked, match=r"recall_neg_drop|drift_score"):
         evaluate(
             ref, cur, write_conn, minio_client,
             run_date=date.today(),

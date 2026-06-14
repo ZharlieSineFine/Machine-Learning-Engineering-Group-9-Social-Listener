@@ -13,8 +13,8 @@ Pipeline (called from `airflow/dags/evaluate_and_monitor.py`):
                                          blocked_promotion flag)
 
 Phase 1 only generates and stores the report. Phase 2 (Step 10) adds the
-*blocking* logic — if drift_score exceeds the threshold OR F1 drops > 3%,
-the DAG fails and the model promotion is blocked.
+*blocking* logic — if drift_score exceeds the threshold OR negative-class
+recall drops > 3%, the DAG fails and the model promotion is blocked.
 
 Owner: Charlie + Ha (Data & Eval).
 """
@@ -38,7 +38,9 @@ CATEGORICAL_COLS = ["source"]
 TARGET_COL = "label"
 
 DEFAULT_DRIFT_THRESHOLD = 0.5  # >= 50% of monitored columns drifted blocks promotion
-DEFAULT_F1_DROP_THRESHOLD = 0.03  # F1 drop > 3% blocks promotion (per WORKFLOW.md)
+DEFAULT_RECALL_NEG_DROP_THRESHOLD = 0.03  # recall_neg drop > 3% blocks promotion
+# Kept for callers/tests that still pass the old kwarg name.
+DEFAULT_F1_DROP_THRESHOLD = DEFAULT_RECALL_NEG_DROP_THRESHOLD
 DEFAULT_BUCKET = "monitoring"
 
 
@@ -63,6 +65,13 @@ class DriftResult:
         return self.drift_score >= threshold
 
 
+def _predict_labels(model, df: pd.DataFrame) -> list:
+    df = df.dropna(subset=["text", "label"])
+    if len(df) == 0:
+        return []
+    return model.predict(df["text"].astype(str).tolist())
+
+
 def compute_model_f1(model, df: pd.DataFrame) -> float:
     """Macro-F1 of `model` on `df` (expects `text` + `label` columns).
 
@@ -74,8 +83,19 @@ def compute_model_f1(model, df: pd.DataFrame) -> float:
     df = df.dropna(subset=["text", "label"])
     if len(df) == 0:
         return 0.0
-    preds = model.predict(df["text"].astype(str).tolist())
+    preds = _predict_labels(model, df)
     return float(f1_score(df["label"], preds, average="macro", zero_division=0))
+
+
+def compute_model_recall_neg(model, df: pd.DataFrame) -> float:
+    """Negative-class recall — primary gate metric for surge detection."""
+    from sklearn.metrics import recall_score
+
+    df = df.dropna(subset=["text", "label"])
+    if len(df) == 0:
+        return 0.0
+    preds = _predict_labels(model, df)
+    return float(recall_score(df["label"], preds, pos_label="negative", zero_division=0))
 
 
 # ---------- pure: report + score computation ----------
@@ -184,7 +204,8 @@ def evaluate(
     minio_client,
     run_date: Optional[date] = None,
     drift_threshold: float = DEFAULT_DRIFT_THRESHOLD,
-    f1_drop_threshold: float = DEFAULT_F1_DROP_THRESHOLD,
+    recall_neg_drop_threshold: float = DEFAULT_RECALL_NEG_DROP_THRESHOLD,
+    f1_drop_threshold: float | None = None,
     report_type: str = "data_drift",
     bucket: str = DEFAULT_BUCKET,
     model=None,
@@ -192,10 +213,12 @@ def evaluate(
 ) -> dict:
     """End-to-end: compute drift, upload HTML, insert pointer row, gate promotion.
 
-    If `model` is provided, also computes macro-F1 on both reference and
-    current. The result blocks promotion when EITHER:
+    If `model` is provided, also scores reference and current slices. The
+    result blocks promotion when EITHER:
         - drift_score >= drift_threshold, OR
-        - reference_f1 - current_f1 > f1_drop_threshold
+        - reference_recall_neg - current_recall_neg > recall_neg_drop_threshold
+
+    Macro-F1 is still computed for observability but does not gate promotion.
 
     Order of operations: upload + insert FIRST, then raise. That way the
     failing report is still discoverable in the dashboard.
@@ -207,17 +230,28 @@ def evaluate(
     run_date = run_date or date.today()
     drift = compute_drift(reference_df, current_df)
 
+    if f1_drop_threshold is not None:
+        recall_neg_drop_threshold = f1_drop_threshold
+
     reference_f1: Optional[float] = None
     current_f1: Optional[float] = None
     f1_drop: Optional[float] = None
+    reference_recall_neg: Optional[float] = None
+    current_recall_neg: Optional[float] = None
+    recall_neg_drop: Optional[float] = None
     if model is not None:
         reference_f1 = compute_model_f1(model, reference_df)
         current_f1 = compute_model_f1(model, current_df)
         f1_drop = reference_f1 - current_f1
+        reference_recall_neg = compute_model_recall_neg(model, reference_df)
+        current_recall_neg = compute_model_recall_neg(model, current_df)
+        recall_neg_drop = reference_recall_neg - current_recall_neg
 
     drift_blocks = drift.is_blocking(drift_threshold)
-    f1_blocks = (f1_drop is not None) and (f1_drop > f1_drop_threshold)
-    blocked = drift_blocks or f1_blocks
+    recall_neg_blocks = (
+        (recall_neg_drop is not None) and (recall_neg_drop > recall_neg_drop_threshold)
+    )
+    blocked = drift_blocks or recall_neg_blocks
 
     s3_url = upload_html_to_minio(
         minio_client, drift.html, run_date, report_type, bucket=bucket
@@ -234,8 +268,11 @@ def evaluate(
         "reference_f1": reference_f1,
         "current_f1": current_f1,
         "f1_drop": f1_drop,
+        "reference_recall_neg": reference_recall_neg,
+        "current_recall_neg": current_recall_neg,
+        "recall_neg_drop": recall_neg_drop,
         "drift_blocks": drift_blocks,
-        "f1_blocks": f1_blocks,
+        "recall_neg_blocks": recall_neg_blocks,
         "blocked_promotion": blocked,
     }
 
@@ -245,10 +282,10 @@ def evaluate(
             reasons.append(
                 f"drift_score={drift.drift_score:.3f} >= {drift_threshold:.3f}"
             )
-        if f1_blocks:
+        if recall_neg_blocks:
             reasons.append(
-                f"f1_drop={f1_drop:.3f} > {f1_drop_threshold:.3f} "
-                f"(ref={reference_f1:.3f}, cur={current_f1:.3f})"
+                f"recall_neg_drop={recall_neg_drop:.3f} > {recall_neg_drop_threshold:.3f} "
+                f"(ref={reference_recall_neg:.3f}, cur={current_recall_neg:.3f})"
             )
         raise PromotionBlocked(
             "Model promotion blocked: " + "; ".join(reasons) +
