@@ -40,10 +40,15 @@ def health() -> HealthResponse:
 def predict(req: PredictRequest) -> PredictResponse:
     if _model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
-
-    # TODO (member): input validation/sanitisation
-    #   - length cap (Pydantic min_length only; add max_length=10_000)
-    #   - strip control chars
+    
+    # Input validation
+    MAX_CHARS = 1000
+    if len(req.text) > MAX_CHARS:
+        raise HTTPException(status_code=422, detail=f"text exceeds {MAX_CHARS} character limit")
+    
+    cleaned = "".join(ch for ch in req.text if ch.isprintable())
+    if not cleaned.strip():
+        raise HTTPException(status_code=422, detail="text is empty after cleaning")
     pred = _model.pipeline.predict([req.text])
     return PredictResponse(label=str(pred[0]))
 

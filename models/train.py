@@ -55,6 +55,11 @@ class TrainResult:
     recall_neg: float
     n_train: int
     n_test: int
+    n_val: int = 0
+    n_oot: int = 0
+    f1_macro_oot: Optional[float] = None
+    f1_weighted_oot: Optional[float] = None
+    cutoff_date: Optional[str] = None
     mlflow_run_id: Optional[str] = None
     mlflow_model_version: Optional[str] = None
 
@@ -80,30 +85,38 @@ def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
         mlflow.log_params({
             "model_type": "tfidf_logreg_baseline",
             "n_train": metrics["n_train"],
+            "n_val": metrics.get("n_val", 0),
             "n_test": metrics["n_test"],
+<<<<<<< HEAD
             "neg_threshold": metrics.get("neg_threshold", ""),
             "tfidf__ngram_range": str(tuned.get("tfidf__ngram_range", "")),
             "tfidf__max_features": tuned.get("tfidf__max_features", ""),
             "clf__C": tuned.get("clf__C", ""),
             "clf__class_weight": str(tuned.get("clf__class_weight", "")),
+=======
+            "n_oot": metrics.get("n_oot", 0),
+>>>>>>> origin/feature/full_flow
         })
-        mlflow.log_metrics({
+        if metrics.get("cutoff_date") is not None:
+            mlflow.log_param("oot_cutoff_date", metrics["cutoff_date"])
+
+        logged_metrics = {
             "f1_macro": metrics["f1_macro"],
             "f1_weighted": metrics["f1_weighted"],
             "accuracy": metrics["accuracy"],
             "f1_neg": metrics["f1_neg"],
             "precision_neg": metrics["precision_neg"],
             "recall_neg": metrics["recall_neg"],
-        })
+        }
+        if metrics.get("f1_macro_oot") is not None:
+            logged_metrics["f1_macro_oot"] = metrics["f1_macro_oot"]
+            logged_metrics["f1_weighted_oot"] = metrics["f1_weighted_oot"]
+        mlflow.log_metrics(logged_metrics)
 
-        # log_model + register in one call. The new version lands at stage `None`;
-        # promotion to Staging/Production is a separate (manual or DAG-driven) step
-        # — see WORKFLOW.md section 6 (Model Lifecycle).
         info = mlflow.sklearn.log_model(
             sk_model=pipe,
             artifact_path="model",
             registered_model_name=model_name,
-            # Bundle preprocessing code so registry loads work outside the repo.
             code_paths=[str(ROOT / "models")],
         )
         version = getattr(info, "registered_model_version", None)
@@ -133,6 +146,11 @@ def run(data_path: Path = DEFAULT_DATA, out_path: Path = DEFAULT_OUT) -> TrainRe
         recall_neg=metrics["recall_neg"],
         n_train=metrics["n_train"],
         n_test=metrics["n_test"],
+        n_val=metrics.get("n_val", 0),
+        n_oot=metrics.get("n_oot", 0),
+        f1_macro_oot=metrics.get("f1_macro_oot"),
+        f1_weighted_oot=metrics.get("f1_weighted_oot"),
+        cutoff_date=metrics.get("cutoff_date"),
         mlflow_run_id=run_id,
         mlflow_model_version=version,
     )

@@ -12,6 +12,9 @@ and is gated by `RUN_SLOW=1` (or `pytest -m slow`).
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -51,19 +54,75 @@ def test_compute_metrics_shape():
     )
     labels = np.array([0, 1, 2, 0])
     metrics = _compute_metrics((logits, labels))
+<<<<<<< HEAD
     assert set(metrics) >= {
         "accuracy", "f1_macro", "f1_negative", "f1_neg", "precision_neg", "recall_neg",
     }
+=======
+    assert {"accuracy", "f1_macro"}.issubset(metrics)
+>>>>>>> origin/feature/full_flow
     assert metrics["accuracy"] == 1.0  # all argmaxes match
     assert 0.0 <= metrics["f1_macro"] <= 1.0
     assert metrics["recall_neg"] == 1.0
 
 
-def test_encode_dataset_returns_torch_tensors():
-    """Use a real (tiny) tokenizer — no model weights download. Fast (<5s)."""
-    from transformers import AutoTokenizer
+class DummyTokenizer:
+    def __call__(self, texts, truncation, padding, max_length):
+        batch_size = len(texts)
+        return {
+            "input_ids": [[1] * max_length for _ in range(batch_size)],
+            "attention_mask": [[1] * max_length for _ in range(batch_size)],
+        }
 
-    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+
+def _install_fake_datasets(monkeypatch):
+    fake = types.ModuleType("datasets")
+
+    class DummyDataset:
+        def __init__(self, df):
+            self._df = df
+            self._data = []
+            self.column_names = []
+
+        @classmethod
+        def from_pandas(cls, df, preserve_index=False):
+            if not preserve_index:
+                df = df.reset_index(drop=True)
+            return cls(df)
+
+        def map(self, fn, batched, remove_columns):
+            mapped = fn({
+                "text": self._df["text"].tolist(),
+                "label_id": self._df["label_id"].tolist(),
+            })
+            self._data = []
+            for i in range(len(mapped["labels"])):
+                self._data.append({
+                    "input_ids": np.array(mapped["input_ids"][i]),
+                    "attention_mask": np.array(mapped["attention_mask"][i]),
+                    "labels": np.array(mapped["labels"][i]),
+                })
+            self.column_names = list(mapped.keys())
+            return self
+
+        def set_format(self, type, columns):
+            self.column_names = list(columns)
+            return self
+
+        def __len__(self):
+            return len(self._data)
+
+        def __getitem__(self, idx):
+            return self._data[idx]
+
+    fake.Dataset = DummyDataset
+    monkeypatch.setitem(sys.modules, "datasets", fake)
+
+
+def test_encode_dataset_returns_torch_tensors(monkeypatch):
+    """Use a fake tokenizer so the unit test stays fast and dependency-free."""
+    _install_fake_datasets(monkeypatch)
+    tokenizer = DummyTokenizer()
     df = pd.DataFrame({
         "text": ["the food was great", "absolutely terrible", "it was okay"],
         "label": ["positive", "negative", "neutral"],
@@ -76,10 +135,9 @@ def test_encode_dataset_returns_torch_tensors():
     assert sample["labels"].item() in {0, 1, 2}
 
 
-def test_encode_dataset_drops_invalid_labels():
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+def test_encode_dataset_drops_invalid_labels(monkeypatch):
+    _install_fake_datasets(monkeypatch)
+    tokenizer = DummyTokenizer()
     df = pd.DataFrame({
         "text": ["a", "b", "c"],
         "label": ["positive", "garbage", "negative"],

@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../Machine-Learning-Engineering-Data-Pipeline"
+		},
+		{
+			"path": "../../TripAdvisor_data_cleaned.csv"
+		},
+		{
+			"path": "../../Yelp_JSON"
+		}
+	],
+	"settings": {}
+}
