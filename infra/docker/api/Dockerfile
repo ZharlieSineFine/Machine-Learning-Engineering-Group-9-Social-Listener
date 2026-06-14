@@ -9,9 +9,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api/ ./
 
-# The sklearn pipeline pickles `models.baseline_sklearn._preprocess_text` as the
-# TfidfVectorizer preprocessor — this module must exist at load time.
-COPY models/__init__.py models/baseline_sklearn.py ./models/
+# Sklearn pipeline pickles reference models.baseline_sklearn; inference modules
+# are shared with batch scoring.
+COPY models/__init__.py models/baseline_sklearn.py models/inference.py \
+     models/prediction_log.py models/metrics.py ./models/
 ENV PYTHONPATH=/app
 
 EXPOSE 8000

@@ -162,12 +162,22 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       MODEL_NAME: ${MODEL_NAME}
       MODEL_STAGE: ${MODEL_STAGE}
+      SHADOW_MODEL_NAME: ${SHADOW_MODEL_NAME}
+      SHADOW_MODEL_STAGE: ${SHADOW_MODEL_STAGE}
+      LOG_PREDICTIONS: ${LOG_PREDICTIONS:-1}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
     ports:
       - "8000:8000"
     depends_on:
       mlflow:
         condition: service_started
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

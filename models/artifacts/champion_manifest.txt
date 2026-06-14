@@ -1,0 +1,139 @@
+# Champion model manifest — Social Listener sentiment models
+# Generated: 2026-06-14
+# Owner: Van (Modeler)
+#
+# This file is safe to commit in git. The binary artifacts it references are
+# gitignored — distribute them offline (Google Drive / USB / GitHub Release).
+
+================================================================================
+CHAMPION MODELS (use these — pulled from MLflow registry)
+================================================================================
+
+1) TF-IDF + LogReg (Production champion)
+   Registry : sentiment-baseline / version 3
+   MLflow run: logreg-final
+   Run ID    : 2caa4bcf701c4003a342a491531a796d
+   Experiment: sentiment-tfidf-logreg
+   Local path: models/artifacts/champion_baseline_v3.pkl
+   Size      : ~6.1 MB
+   neg_threshold (param, not baked into pickle): 0.46
+
+   Metrics (gold split, threshold-tuned):
+     test_f1_negative     0.8727
+     oot_f1_negative      0.8635
+     test_f1_macro        0.7208
+     test_recall_negative 0.9034
+     test_precision_negative 0.8441
+
+   Hyperparameters (logreg-final):
+     tfidf__ngram_range   (1, 3)
+     tfidf__max_features  100000
+     clf__C               10.0
+     clf__class_weight    None
+
+   Load / use:
+     import pickle
+     from models.baseline_sklearn import TunedSentimentPipeline, build_pipeline
+     with open("models/artifacts/champion_baseline_v3.pkl", "rb") as f:
+         pipe = pickle.load(f)
+     # Raw sklearn Pipeline from notebook — wrap with threshold for serving:
+     model = TunedSentimentPipeline(pipeline=pipe, neg_threshold=0.46)
+
+   API offline fallback (copy or symlink):
+     models/artifacts/baseline.pkl  (must be the v3 champion, not a re-run)
+
+--------------------------------------------------------------------------------
+
+2) DistilBERT (Staging / shadow champion)
+   Registry : sentiment-distilbert / version 1
+   MLflow run: distilbert-final
+   Run ID    : 1f09f7ef88684c1c98e1400eaa5eaf24
+   Experiment: sentiment-distilbert
+   Local path: models/artifacts/champion_distilbert_v1/
+   Size      : ~256 MB (model.safetensors + tokenizer; no training checkpoints)
+   neg_threshold (run param — ship alongside artifact): 0.14
+
+   Metrics (gold split, threshold-tuned):
+     test_f1_negative     0.9033
+     oot_f1_negative      0.8912
+     test_f1_macro        0.7905
+     test_recall_negative 0.9276
+     test_precision_negative 0.8802
+
+   Hyperparameters (distilbert-final / distilbert-baseline config):
+     base_model           distilbert-base-uncased
+     max_length           256
+     num_epochs           4
+     learning_rate        2e-5
+     batch_size           16
+     eval_batch_size      32
+
+   Load / use:
+     import mlflow.pytorch
+     model = mlflow.pytorch.load_model("models/artifacts/champion_distilbert_v1")
+     # Or use models/distilbert_finetune.predict() after copying weights into a
+     # flat HuggingFace layout and writing sentiment_config.json with neg_threshold=0.14
+
+================================================================================
+DO NOT USE (local re-runs / stale artifacts in models/artifacts/)
+================================================================================
+
+  baseline.pkl              — v4 thin-slice re-run (test_f1_negative ~0.59)
+  distilbert/               — v2 sample re-run (test_f1_negative ~0.67)
+  distilbert/_trainer/      — training checkpoints only (~3 GB); not for inference
+  tfidf_logreg_best.pkl     — notebook dump; not the registered v3 champion
+  distilbert_best/          — older notebook export; use champion_distilbert_v1/
+
+================================================================================
+MLflow registry status (as of 2026-06-14)
+================================================================================
+
+  sentiment-baseline:
+    v1  Production  bustling-hog-952   (stale DAG run — no metrics; do not use)
+    v3  None        logreg-final         (CHAMPION — promote to Production)
+    v4  None        redolent-asp-311     (sample re-run — do not use)
+
+  sentiment-distilbert:
+    v1  None        distilbert-final     (CHAMPION — promote to Staging)
+    v2  None        carefree-ape-442     (sample re-run — do not use)
+
+  Promote champions (when MLflow is up):
+    python -c "
+    from mlflow.tracking import MlflowClient
+    c = MlflowClient('http://localhost:5001')
+    c.transition_model_version_stage('sentiment-baseline', '3', 'Production', archive_existing_versions=True)
+    c.transition_model_version_stage('sentiment-distilbert', '1', 'Staging', archive_existing_versions=True)
+    "
+
+================================================================================
+OFFLINE INSTALL (teammates without MLflow)
+================================================================================
+
+  1. Copy from Google Drive / USB into repo root, preserving paths:
+       models/artifacts/champion_baseline_v3.pkl
+       models/artifacts/champion_distilbert_v1/   (entire folder)
+
+  2. Optional API shortcut — copy baseline champion:
+       copy models\artifacts\champion_baseline_v3.pkl models\artifacts\baseline.pkl
+     Then unset MLflow and point API at pickle:
+       $env:MODEL_PICKLE_PATH = "models/artifacts/baseline.pkl"
+       Remove-Item Env:MLFLOW_TRACKING_URI -ErrorAction SilentlyContinue
+
+  3. Re-pull from MLflow if you have Docker stack running:
+       $env:MLFLOW_TRACKING_URI = "http://localhost:5001"
+       python scripts/compare_mlflow_models.py
+
+================================================================================
+SHARING GUIDANCE
+================================================================================
+
+  GitHub merge request : commit THIS manifest only (models/champion_manifest.txt)
+  Google Drive / USB   : share the binary bundle (~262 MB):
+                           champion_baseline_v3.pkl          (~6 MB)
+                           champion_distilbert_v1/           (~256 MB)
+                         Do NOT zip distilbert/_trainer/ checkpoints.
+
+  Why not git?
+    - models/artifacts/ and *.pkl / *.safetensors are gitignored by design
+    - champion_distilbert_v1/model/model.safetensors is ~268 MB (> GitHub 100 MB limit)
+    - Repo policy: large artifacts via Drive / release asset / S3 / DVC (see .gitignore)
