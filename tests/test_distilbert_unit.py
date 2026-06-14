@@ -39,7 +39,7 @@ def test_label_map_roundtrip():
 
 def test_train_config_defaults():
     cfg = TrainConfig()
-    assert cfg.num_epochs >= 1
+    assert cfg.num_epochs == 4
     assert cfg.max_length == DEFAULT_MAX_LEN
     assert cfg.max_steps == -1  # i.e. honor num_epochs unless overridden
 
@@ -54,9 +54,16 @@ def test_compute_metrics_shape():
     )
     labels = np.array([0, 1, 2, 0])
     metrics = _compute_metrics((logits, labels))
+<<<<<<< HEAD
+    assert set(metrics) >= {
+        "accuracy", "f1_macro", "f1_negative", "f1_neg", "precision_neg", "recall_neg",
+    }
+=======
     assert {"accuracy", "f1_macro"}.issubset(metrics)
+>>>>>>> origin/feature/full_flow
     assert metrics["accuracy"] == 1.0  # all argmaxes match
     assert 0.0 <= metrics["f1_macro"] <= 1.0
+    assert metrics["recall_neg"] == 1.0
 
 
 class DummyTokenizer:

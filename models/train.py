@@ -81,12 +81,21 @@ def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
     mlflow.set_experiment(experiment)
 
     with mlflow.start_run() as run:
+        tuned = metrics.get("tuned_params", {})
         mlflow.log_params({
             "model_type": "tfidf_logreg_baseline",
             "n_train": metrics["n_train"],
             "n_val": metrics.get("n_val", 0),
             "n_test": metrics["n_test"],
+<<<<<<< HEAD
+            "neg_threshold": metrics.get("neg_threshold", ""),
+            "tfidf__ngram_range": str(tuned.get("tfidf__ngram_range", "")),
+            "tfidf__max_features": tuned.get("tfidf__max_features", ""),
+            "clf__C": tuned.get("clf__C", ""),
+            "clf__class_weight": str(tuned.get("clf__class_weight", "")),
+=======
             "n_oot": metrics.get("n_oot", 0),
+>>>>>>> origin/feature/full_flow
         })
         if metrics.get("cutoff_date") is not None:
             mlflow.log_param("oot_cutoff_date", metrics["cutoff_date"])

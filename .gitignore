@@ -77,6 +77,8 @@ airflow/webserver_config.py
 # 227 MB — distribute via release asset / S3 / DVC, not git.
 # The smoke test uses data/sample/reviews_sample.csv (kept in repo).
 Malaysia Restaurant Review Datasets/
+# Charlie's gold-layer parquet export (feature_store + label_store); Postgres pipeline TBD.
+data/local/
 
 # ---------- Medallion layer outputs (regenerated — not for git) ----------
 # Bronze = raw source rows + provenance. Silver/Gold = partitioned parquet.
