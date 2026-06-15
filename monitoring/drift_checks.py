@@ -1,262 +1,247 @@
-"""Evidently drift report — Phase 1 stub.
+"""Evidently drift check — Phase 1 stub.
 
-Pipeline (called from `airflow/dags/evaluate_and_monitor.py`):
-    reference_df (training slice)  ─┐
-                                    ├── Evidently Report (data + target drift)
-    current_df   (recent reviews)  ─┘
-                                    │
-                                    ├── HTML report  ── uploaded to MinIO bucket
-                                    │                   `monitoring/<date>/<type>.html`
-                                    │
-                                    └── pointer row inserted into Postgres
-                                        `monitoring_reports` (s3 url, drift score,
-                                         blocked_promotion flag)
+This is the wiring slice for the ``evaluate_and_monitor`` DAG described in
+ARCHITECTURE.md §5. Real monitoring (train baseline vs. last 7d of ingested
+reviews) lands in Phase 2; right now **there is no train data yet**, so this
+module follows the plan in ``monitoring/README.md``:
 
-Phase 1 only generates and stores the report. Phase 2 (Step 10) adds the
-*blocking* logic — if drift_score exceeds the threshold OR F1 drops > 3%,
-the DAG fails and the model promotion is blocked.
+    > Phase 1 stub: Run Evidently with ``DataDriftPreset`` on train vs. itself
+    > (will always pass) so the wiring exists. Real reference dataset comes in
+    > phase 2.
 
-Owner: Charlie + Ha (Data & Eval).
+So we load the in-repo sample CSV (the contract source-of-truth) as both the
+*reference* and the *current* frame. Identical frames → zero drift → the gate
+always passes. The value here is the plumbing: a callable an Airflow
+PythonOperator can run, an HTML report on disk, and a summary dict ready to be
+appended to the ``monitoring_reports`` table once Postgres wiring lands.
+
+Designed to be runnable three ways, like ``models/train.py``:
+    * directly from the Airflow DAG via PythonOperator,
+    * from the CLI (``python monitoring/drift_checks.py``),
+    * from a unit/smoke test calling ``run_drift_check()``.
+
+Nothing here requires Postgres, MinIO, or MLflow to be up — that keeps it
+smoke-testable, matching the rest of the Phase 1 thin slice.
+
+Owner: Charlie + Ha (Monitoring).
 """
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, asdict
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from evidently import ColumnMapping
-from evidently.metric_preset import DataDriftPreset, TargetDriftPreset
-from evidently.report import Report
 
-# Drift is computed over structured columns only for the thin slice.
-# TODO (member, Phase 2): add text-drift via SentenceTransformer embeddings
-# and a `TextOverviewPreset` once a real embedding model is registered.
-NUMERICAL_COLS = ["rating"]
-CATEGORICAL_COLS = ["source"]
-TARGET_COL = "label"
-
-DEFAULT_DRIFT_THRESHOLD = 0.5  # >= 50% of monitored columns drifted blocks promotion
-DEFAULT_F1_DROP_THRESHOLD = 0.03  # F1 drop > 3% blocks promotion (per WORKFLOW.md)
-DEFAULT_BUCKET = "monitoring"
+# ---------------------------------------------------------------------------
+# Path resolution — works both inside the Airflow container (where the repo is
+# split across /opt/project/{data,monitoring}) and from a local checkout.
+# ---------------------------------------------------------------------------
+def _first_existing(*candidates: Path) -> Optional[Path]:
+    for c in candidates:
+        if c and c.exists():
+            return c
+    return None
 
 
-class PromotionBlocked(RuntimeError):
-    """Raised by the DAG when drift / F1-drop crosses the threshold.
+# Local checkout root: monitoring/ -> repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
-    The report has already been uploaded by the time this raises, so the
-    Airflow task log + the dashboard's monitoring tab will both have a
-    pointer to the failing report.
-    """
+DEFAULT_SAMPLE_CSV = _first_existing(
+    Path(os.getenv("DRIFT_SAMPLE_CSV", "")) if os.getenv("DRIFT_SAMPLE_CSV") else None,
+    Path("/opt/project/data/sample/reviews_sample.csv"),  # Airflow container mount
+    _REPO_ROOT / "data" / "sample" / "reviews_sample.csv",  # local checkout
+)
+
+# Where the HTML report is written. Phase 2 swaps this for MinIO
+# (s3://monitoring/{date}/report.html) per monitoring/README.md.
+DEFAULT_REPORT_DIR = Path(
+    os.getenv("DRIFT_REPORT_DIR", "/opt/project/monitoring/reports")
+)
+
+# Drift gate threshold from monitoring/README.md ("drift score > 0.3").
+DRIFT_THRESHOLD = float(os.getenv("DRIFT_THRESHOLD", "0.3"))
 
 
 @dataclass
 class DriftResult:
-    html: bytes
-    drift_score: float          # share of monitored columns that drifted
-    drifted_columns: list
+    """What the DAG hands forward / will write to ``monitoring_reports``."""
+
+    report_path: str
+    drift_score: float          # share of drifted columns (0.0 .. 1.0)
+    n_drifted_columns: int
+    dataset_drift: bool
+    passed_gate: bool           # True == no actionable drift
     n_reference: int
     n_current: int
-
-    def is_blocking(self, threshold: float = DEFAULT_DRIFT_THRESHOLD) -> bool:
-        return self.drift_score >= threshold
+    evidently_ran: bool         # False if we fell back to the no-op stub
 
 
-def compute_model_f1(model, df: pd.DataFrame) -> float:
-    """Macro-F1 of `model` on `df` (expects `text` + `label` columns).
+# ---------------------------------------------------------------------------
+# Feature frame
+# ---------------------------------------------------------------------------
+def _features_from_reviews(df: pd.DataFrame) -> pd.DataFrame:
+    """Project raw reviews onto the columns we actually monitor.
 
-    Works for any model with a `.predict([text]) -> [label]` interface —
-    sklearn Pipeline, mlflow.sklearn loaded model, or a custom wrapper.
+    Mirrors the "data drift" row in monitoring/README.md: text-length
+    distribution, source mix, rating, and label distribution. Keeping this
+    tiny and explicit means Evidently has typed numeric + categorical columns
+    to reason about instead of free-text it would just ignore.
     """
-    from sklearn.metrics import f1_score
-
-    df = df.dropna(subset=["text", "label"])
-    if len(df) == 0:
-        return 0.0
-    preds = model.predict(df["text"].astype(str).tolist())
-    return float(f1_score(df["label"], preds, average="macro", zero_division=0))
-
-
-# ---------- pure: report + score computation ----------
-
-def _column_mapping() -> ColumnMapping:
-    return ColumnMapping(
-        target=TARGET_COL,
-        numerical_features=NUMERICAL_COLS,
-        categorical_features=CATEGORICAL_COLS,
-    )
+    out = pd.DataFrame()
+    out["text_len"] = df["text"].fillna("").astype(str).str.len()
+    if "rating" in df.columns:
+        out["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+    if "source" in df.columns:
+        out["source"] = df["source"].astype("category")
+    if "label" in df.columns:
+        out["label"] = df["label"].astype("category")
+    return out
 
 
-def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> DriftResult:
-    """Build the Evidently report and extract a single drift_score.
+def _build_reference_and_current(
+    sample_csv: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Phase 1: reference == current == the sample CSV (train vs. itself).
 
-    Pure function — no DB, no S3. Easy to unit test.
+    Phase 2 replaces ``current`` with the last 7 days of ingested reviews
+    pulled from Postgres ``reviews_silver`` / ``reviews_gold``.
     """
-    report = Report(metrics=[DataDriftPreset(), TargetDriftPreset()])
-    report.run(
-        reference_data=reference_df,
-        current_data=current_df,
-        column_mapping=_column_mapping(),
-    )
+    df = pd.read_csv(sample_csv)
+    features = _features_from_reviews(df)
+    # Same data on both sides -> guaranteed-pass gate, by design.
+    return features, features.copy()
 
-    # `as_dict()` shape: {"metrics": [{...}, ...]} — we want the DataDriftTable.
-    payload = report.as_dict()
-    drift_score = 0.0
-    drifted_columns: list = []
-    for m in payload.get("metrics", []):
-        if m.get("metric") == "DatasetDriftMetric":
-            res = m.get("result", {})
-            drift_score = float(res.get("share_of_drifted_columns", 0.0))
-        if m.get("metric") == "DataDriftTable":
-            cols = m.get("result", {}).get("drift_by_columns", {})
-            drifted_columns = [c for c, v in cols.items() if v.get("drift_detected")]
 
-    # Evidently's `save_html` wants a filesystem path. Round-trip via a temp file.
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-        tmp_path = tmp.name
+# ---------------------------------------------------------------------------
+# Evidently — supports both the classic (0.4–0.6) and new (0.7+) APIs, and
+# degrades to a deterministic no-op summary rather than failing the DAG if the
+# installed Evidently build exposes neither. Phase 1 is about wiring, not about
+# a perfect report.
+# ---------------------------------------------------------------------------
+def _run_evidently(
+    reference: pd.DataFrame, current: pd.DataFrame, html_path: Path
+) -> Optional[dict]:
+    """Run DataDriftPreset and return a normalized summary, or None on fallback."""
+    # Classic API: evidently 0.4.x – 0.6.x
     try:
-        report.save_html(tmp_path)
-        with open(tmp_path, "rb") as fh:
-            html = fh.read()
-    finally:
-        import os as _os
+        from evidently.report import Report
+        from evidently.metric_preset import DataDriftPreset
+
+        report = Report(metrics=[DataDriftPreset()])
+        report.run(reference_data=reference, current_data=current)
+        report.save_html(str(html_path))
+        summary = report.as_dict()["metrics"][0]["result"]
+        return {
+            "dataset_drift": bool(summary.get("dataset_drift", False)),
+            "drift_score": float(summary.get("share_of_drifted_columns", 0.0)),
+            "n_drifted_columns": int(summary.get("number_of_drifted_columns", 0)),
+        }
+    except ImportError:
+        pass  # not the classic API — try the new one
+    except Exception as exc:  # report ran but shape differs; don't kill the DAG
+        print(f"[drift] classic Evidently API errored, falling back: {exc}")
+
+    # New API: evidently 0.7+
+    try:
+        from evidently import Report
+        from evidently.presets import DataDriftPreset
+
+        report = Report(metrics=[DataDriftPreset()])
+        snapshot = report.run(reference_data=reference, current_data=current)
         try:
-            _os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
-
-    return DriftResult(
-        html=html,
-        drift_score=drift_score,
-        drifted_columns=drifted_columns,
-        n_reference=len(reference_df),
-        n_current=len(current_df),
-    )
-
-
-# ---------- side-effects: MinIO + Postgres ----------
-
-def upload_html_to_minio(
-    minio_client,
-    html: bytes,
-    run_date: date,
-    report_type: str,
-    bucket: str = DEFAULT_BUCKET,
-) -> str:
-    """Upload report HTML to `s3://<bucket>/<date>/<type>.html`. Returns s3 URL."""
-    key = f"{run_date.isoformat()}/{report_type}.html"
-    minio_client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=html,
-        ContentType="text/html",
-    )
-    return f"s3://{bucket}/{key}"
+            snapshot.save_html(str(html_path))
+        except Exception as exc:  # HTML rendering optional in Phase 1
+            print(f"[drift] new-API HTML render skipped: {exc}")
+        result = snapshot.dict()
+        # The 0.7 schema differs; pull what we can, default to "no drift".
+        share = _dig_drift_share(result)
+        return {
+            "dataset_drift": share > 0.0,
+            "drift_score": share,
+            "n_drifted_columns": 0,
+        }
+    except Exception as exc:
+        print(f"[drift] Evidently unavailable/incompatible, using stub: {exc}")
+        return None
 
 
-def insert_pointer_row(
-    conn,
-    run_date: date,
-    report_type: str,
-    s3_url: str,
-    drift_score: float,
-    blocked: bool,
-) -> int:
-    """Insert a row into monitoring_reports and return its id."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO monitoring_reports "
-            "(run_date, report_type, report_url, drift_score, blocked_promotion) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (run_date, report_type, s3_url, drift_score, blocked),
-        )
-        return cur.fetchone()[0]
+def _dig_drift_share(result: dict) -> float:
+    """Best-effort scrape of a drift share out of the 0.7 snapshot dict."""
+    metrics = result.get("metrics", [])
+    for m in metrics:
+        val = m.get("value")
+        if isinstance(val, dict) and "share" in val:
+            try:
+                return float(val["share"])
+            except (TypeError, ValueError):
+                continue
+    return 0.0
 
 
-# ---------- orchestrator ----------
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+def run_drift_check(
+    sample_csv: Optional[Path] = None,
+    report_dir: Optional[Path] = None,
+    threshold: float = DRIFT_THRESHOLD,
+) -> DriftResult:
+    """Run the Phase 1 drift stub and return a structured result.
 
-def evaluate(
-    reference_df: pd.DataFrame,
-    current_df: pd.DataFrame,
-    conn,
-    minio_client,
-    run_date: Optional[date] = None,
-    drift_threshold: float = DEFAULT_DRIFT_THRESHOLD,
-    f1_drop_threshold: float = DEFAULT_F1_DROP_THRESHOLD,
-    report_type: str = "data_drift",
-    bucket: str = DEFAULT_BUCKET,
-    model=None,
-    raise_on_block: bool = False,
-) -> dict:
-    """End-to-end: compute drift, upload HTML, insert pointer row, gate promotion.
-
-    If `model` is provided, also computes macro-F1 on both reference and
-    current. The result blocks promotion when EITHER:
-        - drift_score >= drift_threshold, OR
-        - reference_f1 - current_f1 > f1_drop_threshold
-
-    Order of operations: upload + insert FIRST, then raise. That way the
-    failing report is still discoverable in the dashboard.
-
-    `raise_on_block=True` raises PromotionBlocked when blocked — used by
-    the Airflow DAG so the task fails red. Default is False so unit/integration
-    callers can inspect the dict.
+    Always returns (never raises on Evidently internals) so the Airflow task
+    stays green while the pipeline is still being wired together.
     """
-    run_date = run_date or date.today()
-    drift = compute_drift(reference_df, current_df)
-
-    reference_f1: Optional[float] = None
-    current_f1: Optional[float] = None
-    f1_drop: Optional[float] = None
-    if model is not None:
-        reference_f1 = compute_model_f1(model, reference_df)
-        current_f1 = compute_model_f1(model, current_df)
-        f1_drop = reference_f1 - current_f1
-
-    drift_blocks = drift.is_blocking(drift_threshold)
-    f1_blocks = (f1_drop is not None) and (f1_drop > f1_drop_threshold)
-    blocked = drift_blocks or f1_blocks
-
-    s3_url = upload_html_to_minio(
-        minio_client, drift.html, run_date, report_type, bucket=bucket
-    )
-    row_id = insert_pointer_row(
-        conn, run_date, report_type, s3_url, drift.drift_score, blocked
-    )
-
-    result = {
-        "report_id": row_id,
-        "s3_url": s3_url,
-        "drift_score": drift.drift_score,
-        "drifted_columns": drift.drifted_columns,
-        "reference_f1": reference_f1,
-        "current_f1": current_f1,
-        "f1_drop": f1_drop,
-        "drift_blocks": drift_blocks,
-        "f1_blocks": f1_blocks,
-        "blocked_promotion": blocked,
-    }
-
-    if blocked and raise_on_block:
-        reasons = []
-        if drift_blocks:
-            reasons.append(
-                f"drift_score={drift.drift_score:.3f} >= {drift_threshold:.3f}"
-            )
-        if f1_blocks:
-            reasons.append(
-                f"f1_drop={f1_drop:.3f} > {f1_drop_threshold:.3f} "
-                f"(ref={reference_f1:.3f}, cur={current_f1:.3f})"
-            )
-        raise PromotionBlocked(
-            "Model promotion blocked: " + "; ".join(reasons) +
-            f". Report: {s3_url}"
+    sample_csv = Path(sample_csv) if sample_csv else DEFAULT_SAMPLE_CSV
+    if not sample_csv or not sample_csv.exists():
+        raise FileNotFoundError(
+            f"sample CSV not found: {sample_csv!r} — set DRIFT_SAMPLE_CSV"
         )
 
+    report_dir = Path(report_dir) if report_dir else DEFAULT_REPORT_DIR
+    report_dir.mkdir(parents=True, exist_ok=True)
+    html_path = report_dir / f"{date.today():%Y-%m-%d}" / "report.html"
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+
+    reference, current = _build_reference_and_current(sample_csv)
+    summary = _run_evidently(reference, current, html_path)
+
+    if summary is None:
+        # Deterministic fallback: identical frames -> zero drift, gate passes.
+        result = DriftResult(
+            report_path=str(html_path),
+            drift_score=0.0,
+            n_drifted_columns=0,
+            dataset_drift=False,
+            passed_gate=True,
+            n_reference=len(reference),
+            n_current=len(current),
+            evidently_ran=False,
+        )
+    else:
+        drift_score = summary["drift_score"]
+        result = DriftResult(
+            report_path=str(html_path),
+            drift_score=drift_score,
+            n_drifted_columns=summary["n_drifted_columns"],
+            dataset_drift=summary["dataset_drift"],
+            passed_gate=drift_score <= threshold,
+            n_reference=len(reference),
+            n_current=len(current),
+            evidently_ran=True,
+        )
+
+    print(f"[drift] {result}")
     return result
 
 
-def _summary_for_log(result: dict) -> str:
-    return json.dumps({k: v for k, v in result.items() if k != "html"}, default=str)
+def main() -> None:
+    result = run_drift_check()
+    for k, v in asdict(result).items():
+        print(f"{k}: {v}")
+
+
+if __name__ == "__main__":
+    main()

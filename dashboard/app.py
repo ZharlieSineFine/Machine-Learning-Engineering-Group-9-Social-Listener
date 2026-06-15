@@ -477,6 +477,49 @@ def render_topic_breakdown() -> None:
     </div>"""
     _card(inner + placeholder)
 
+
+def render_mlflow_ab() -> None:
+    st.subheader("Model A/B — recent MLflow runs")
+    runs = list_mlflow_runs(
+        experiment_names=[os.getenv("MLFLOW_EXPERIMENT", "sentiment-baseline")],
+    )
+    if runs.empty:
+        st.info("No MLflow runs found (set MLFLOW_TRACKING_URI and train a model).")
+        return
+    st.dataframe(
+        runs[[
+            "start_time", "experiment", "model_type",
+            "recall_neg", "f1_neg", "precision_neg", "f1_macro", "n_train",
+        ]],
+        use_container_width=True,
+    )
+
+
+def render_drift_report(dsn: Optional[str]) -> None:
+    st.subheader("Latest drift report")
+    rep = latest_drift_report(dsn)
+    if not rep:
+        st.info("No drift reports yet. Trigger the `evaluate_and_monitor` DAG.")
+        return
+    cols = st.columns(3)
+    cols[0].metric("Drift score", f"{rep['drift_score']:.2f}")
+    cols[1].metric("Blocked?", "Yes" if rep["blocked_promotion"] else "No")
+    cols[2].metric("Run date", str(rep["run_date"]))
+    st.caption(f"Report: `{rep['report_url']}`")
+
+    minio = _minio_client()
+    if minio is None:
+        st.info("Set MLFLOW_S3_ENDPOINT_URL + AWS creds to embed the HTML report.")
+        return
+    try:
+        html = fetch_drift_html(rep["report_url"], minio)
+        st.components.v1.html(html.decode("utf-8", errors="replace"), height=600, scrolling=True)
+    except Exception as exc:
+        st.error(f"Could not fetch report: {exc}")
+
+
+# ---------- entry point ----------
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

@@ -77,9 +77,19 @@ airflow/webserver_config.py
 # 227 MB — distribute via release asset / S3 / DVC, not git.
 # The smoke test uses data/sample/reviews_sample.csv (kept in repo).
 Malaysia Restaurant Review Datasets/
+# Charlie's gold-layer parquet export (feature_store + label_store); Postgres pipeline TBD.
+data/local/
+
+# ---------- Medallion layer outputs (regenerated — not for git) ----------
+# Bronze = raw source rows + provenance. Silver/Gold = partitioned parquet.
+# Distribute large artifacts via Drive / release asset / S3 / DVC, not git.
+#   Bronze:  python -m data.run_daily --run-date YYYY-MM-DD
+#   Silver:  data/silver/reviews/review_date=*/part.parquet
+#   Gold:    data/gold/{feature_store,label_store}/review_date=*/part.parquet
 data/bronze/
 data/silver/
 data/gold/
+*.parquet
 data/demo_data/
 
 # ---------- Great Expectations local state ----------
@@ -122,3 +132,4 @@ docker-compose.*.local.yml
 .pyre/
 .pytype/
 .benchmarks/
+.cursor/plans/docker_data_pipeline_3a738118.plan.md

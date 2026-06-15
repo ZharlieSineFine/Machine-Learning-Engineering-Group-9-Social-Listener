@@ -1,0 +1,71 @@
+{
+  "best_metric": 0.8893805309734514,
+  "best_model_checkpoint": "c:\\SMU_MITB\\MLE\\CS611_MLE\\social_listener_project\\Machine-Learning-Engineering-Group-9-Social-Listener\\checkpoints\\distilbert-sentiment/distilbert-lr-5e-05\\checkpoint-2151",
+  "epoch": 1.0,
+  "eval_steps": 500,
+  "global_step": 2151,
+  "is_hyper_param_search": false,
+  "is_local_process_zero": true,
+  "is_world_process_zero": true,
+  "log_history": [
+    {
+      "epoch": 0.23245002324500233,
+      "grad_norm": 5.083352565765381,
+      "learning_rate": 4.2739018087855295e-05,
+      "loss": 0.6749,
+      "step": 500
+    },
+    {
+      "epoch": 0.46490004649000466,
+      "grad_norm": 16.07216453552246,
+      "learning_rate": 2.9819121447028426e-05,
+      "loss": 0.533,
+      "step": 1000
+    },
+    {
+      "epoch": 0.697350069735007,
+      "grad_norm": 6.507741928100586,
+      "learning_rate": 1.6899224806201553e-05,
+      "loss": 0.5139,
+      "step": 1500
+    },
+    {
+      "epoch": 0.9298000929800093,
+      "grad_norm": 17.3245792388916,
+      "learning_rate": 3.979328165374677e-06,
+      "loss": 0.4702,
+      "step": 2000
+    },
+    {
+      "epoch": 1.0,
+      "eval_f1_macro": 0.7903161082001099,
+      "eval_f1_negative": 0.8893805309734514,
+      "eval_loss": 0.45174646377563477,
+      "eval_runtime": 31.5738,
+      "eval_samples_per_second": 136.252,
+      "eval_steps_per_second": 4.276,
+      "step": 2151
+    }
+  ],
+  "logging_steps": 500,
+  "max_steps": 2151,
+  "num_input_tokens_seen": 0,
+  "num_train_epochs": 1,
+  "save_steps": 500,
+  "stateful_callbacks": {
+    "TrainerControl": {
+      "args": {
+        "should_epoch_stop": false,
+        "should_evaluate": false,
+        "should_log": false,
+        "should_save": true,
+        "should_training_stop": true
+      },
+      "attributes": {}
+    }
+  },
+  "total_flos": 2279340943059456.0,
+  "train_batch_size": 16,
+  "trial_name": null,
+  "trial_params": null
+}

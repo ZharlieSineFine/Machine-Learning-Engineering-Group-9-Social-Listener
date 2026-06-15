@@ -70,12 +70,14 @@ Airflow schedules every step on a **6-hour batch inference cycle**.
 
 ### Layer contracts (what each layer guarantees the next one)
 
+Reviews are **immutable events**, not monthly state snapshots. The daily driver (`data/run_daily.py`) lands each pull under an **ingestion date** (`dt=YYYY-MM-DD`) and upserts **event-date** partitions (`review_date=YYYY-MM-DD`). Re-running the same ingestion date is idempotent; late-arriving reviews update the partition for their `review_date`, not today's.
+
 | Layer | Storage | Contract | Owner |
 |---|---|---|---|
 | **Sources** | external + `data/sample/reviews_sample.csv` (in repo, ~1k labelled rows for smoke + baseline) | JSON / CSV from upstream, no guarantees. Sample columns: `text, label, rating, source, restaurant, location` | Charlie + Ha |
-| **Bronze** | MinIO `s3://datasets/bronze/{source}/{date}/` | Untouched payload + `_ingested_at`, `_source` provenance fields. Append-only. | Charlie + Ha |
-| **Silver** | Postgres `reviews_silver` + MinIO `silver/` | Schema-validated (GE), deduplicated by `(source, restaurant, text-hash)`, PII-masked (email, phone, personal names) | Charlie + Ha |
-| **Gold** | Postgres `reviews_gold` + MinIO `gold/embeddings/` | Embeddings, rolling aggregates per restaurant/location, string sentiment labels (ground truth where the CSV has one; derived from `rating` otherwise; overridden by `human_corrections` when present — tagged via `label_source`) | Charlie + Ha → Van |
+| **Bronze** | MinIO `s3://datasets/bronze/{source}/dt={YYYY-MM-DD}/` (locally `data/bronze/{source}/dt=…/`) | **Raw, source-native** rows — verbatim source columns + `_source`, `_ingested_at`. No join/label/cleaning. Partition = load date. | Charlie + Ha |
+| **Silver** | Postgres `reviews_silver` + `data/silver/reviews/review_date=…/` | GE-gated, deduped by `(source, source_id)` keeping latest `_ingested_at`. **Scoped to the last 3 years per source** (each source anchors on its own max review date); Bronze keeps full history. Carries `rating` + ISO `date` + `source_id`. **No labels.** Partition = review event date. Pass `--all-years` to `run_daily` for the full archive. | Charlie + Ha |
+| **Gold** | `data/gold/feature_store/` + `data/gold/label_store/` (+ Postgres `reviews_gold` in prod) | Per-review `feature_store` (`review_id`, `review_date`, `text`) and `label_store` (`review_id`, `review_date`, `label`) keyed by `review_id` (= `source_id`). Labels derived from `rating` in Gold only. | Charlie + Ha → Van |
 
 ### Replay simulator
 
@@ -117,6 +119,16 @@ Lives in `data/ingest/replay.py`. Replays a fixed timeline of reviews into Bronz
 
 The shadow window is **two 6-hour batch cycles by default** (12h) before promotion is considered.
 
+### Train / validation / test / OOT split
+
+`train_model` doesn't split the Gold set at random. It uses the **Silver** `date` column (normalised to ISO from each source's raw Bronze stamp) to build an **out-of-time (OOT)** hold-out (`models/splits.py`): the most recent slice of reviews (by timestamp) is set aside as a stand-in for "reviews that arrive after we ship", and everything older is split — stratified on label — into **train** (fit), **validation** (tune / model selection), and **test** (in-time estimate).
+
+- `test` measures *in-distribution* generalisation (same period as train).
+- `oot` measures *temporal* generalisation (genuinely later reviews).
+- The **test → OOT F1 drop** is the offline preview of the drift Evidently watches for in production; it's logged to MLflow (`f1_macro`, `f1_macro_oot`, `oot_cutoff_date`) so the promotion gate can refuse models that hold up in-time but fall apart out-of-time.
+
+Rows with a null `date` join the in-time pool; if no row is dated (e.g. the seed CSV) the split degrades to a plain stratified train/val/test.
+
 ---
 
 ## 5. Component Map
@@ -149,13 +161,16 @@ mle_project/
 │   ├── distilbert_finetune.py    # Phase 2
 │   └── embeddings.py             # Used by Gold layer
 ├── data/                         # Medallion layers              (Charlie + Ha)
-│   ├── ingest/
-│   │   ├── yelp_loader.py
-│   │   ├── malaysia_loader.py
+│   ├── ingest/                   # SOURCES → BRONZE (raw, source-native + provenance)
+│   │   ├── yelp_loader.py        # Yelp tar → dt= partitions (reviews + business)
+│   │   ├── malaysia_review_loader.py  # Malaysia TripAdvisor → dt= partitions
 │   │   └── replay.py             # Replay simulator
-│   ├── refine/
+│   ├── refine/                   # BRONZE → SILVER (join, clean, dedup); Silver → Gold (labels)
+│   │   ├── build_silver.py       # Bronze → review_date= Silver parquet partitions
+│   │   ├── build_gold.py         # Silver → feature_store + label_store partitions
 │   │   ├── dedupe.py
 │   │   └── pii_mask.py
+│   ├── run_daily.py              # Incremental driver (bronze → silver → GE → gold)
 │   ├── expectations/             # Great Expectations suites
 │   ├── schemas/                  # SQL DDL for *_silver, *_gold + Pydantic types
 │   └── sample/                   # Tiny in-repo seed for CI smoke
@@ -182,7 +197,7 @@ mle_project/
 |---|---|---|---|
 | `postgres` | 5432 | default | — |
 | `minio` + `minio-init` | 9000 / 9001 | default | — |
-| `mlflow` | 5000 | default | postgres, minio-init |
+| `mlflow` | 5001 (host) → 5000 (container) | default | postgres, minio-init |
 | `airflow-init` / `webserver` / `scheduler` | 8080 | default | postgres |
 | `api` | 8000 | default | mlflow |
 | `dashboard` | 8501 | default | api, postgres |
@@ -221,7 +236,7 @@ reviews_gold (
   embedding       BYTEA,                 -- (or VECTOR(384) if pgvector enabled)
   text_len        INT,
   label           TEXT NOT NULL,         -- 'negative' | 'neutral' | 'positive'
-  label_source    TEXT NOT NULL,         -- 'ground_truth' | 'derived_from_rating' | 'model_v{n}' | 'human_correction'
+  -- label_source (future/prod): provenance tracking for human corrections / model labels
   built_at        TIMESTAMPTZ DEFAULT now()
 );
 
@@ -255,7 +270,7 @@ human_corrections (
 );
 ```
 
-The training DAG joins `reviews_gold` with `human_corrections` and prefers human labels when present — that's how the feedback loop closes. When `label` is missing in Silver, the Gold builder derives it from `rating` (`<=2 → negative`, `3 → neutral`, `>=4 → positive`) and tags `label_source='derived_from_rating'`.
+The training DAG joins `reviews_gold` with `human_corrections` and prefers human labels when present — that's how the feedback loop closes. The Gold builder derives `label` from `rating` (`<=2 → negative`, `3 → neutral`, `>=4 → positive`) via `label_from_rating()` in `data/refine/build_gold.py`.
 
 ---
 

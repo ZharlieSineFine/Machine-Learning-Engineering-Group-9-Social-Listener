@@ -154,7 +154,7 @@ Phase 1 (MVP skeleton)  ──►  Phase 2 (depth)  ──►  Phase 3 (polish +
 |---|---|---|
 | Bronze object layout | Charlie/Ha → Charlie/Ha | `s3://datasets/bronze/{source}/{YYYY-MM-DD}/*.json[.gz]` with provenance fields |
 | `reviews_silver` table | Charlie/Ha → Van + Amelia | Columns + types in `data/schemas/silver.sql`; PII-masked |
-| `reviews_gold` table | Charlie/Ha (with Van for embeddings) → Van | Columns + `label_source` tagging |
+| `reviews_gold` table | Charlie/Ha (with Van for embeddings) → Van | Columns + label derivation from `rating` |
 | MLflow run logging | Van → Charlie/Ha | Metric names (`f1_macro`, `precision_neg`, …), tag conventions |
 | MLflow registered model name | Van → Amelia | `sentiment-baseline` (P1), `sentiment-distilbert` (P2); aliases `Production`, `Staging` |
 | FastAPI request/response schema | Amelia → dashboard, downstream | Pydantic models in `api/app/schemas.py` |
@@ -194,7 +194,7 @@ When a contract changes, the owner opens a PR that updates the contract file *an
 | Spin up locally | `docker compose up` from repo root |
 | Run smoke tests | `docker compose run --rm smoke` |
 | Airflow UI | `http://localhost:8080` |
-| MLflow UI | `http://localhost:5000` |
+| MLflow UI | `http://localhost:5001` (host; container port 5000) |
 | FastAPI docs | `http://localhost:8000/docs` |
 | Streamlit dashboard | `http://localhost:8501` |
 | MinIO console | `http://localhost:9001` |

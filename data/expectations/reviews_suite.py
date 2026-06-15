@@ -1,23 +1,9 @@
-"""Great Expectations suite for the `reviews` dataset (Phase 1 thin slice).
+"""Great Expectations gates for Silver, Gold, and Phase-1 Postgres ingest.
 
-Validation gate that runs BEFORE rows hit Postgres. If `validate_reviews(df)`
-returns a failed result, the ingestion DAG fails the task and no data is
-written, so a bad upstream batch can't poison the warehouse.
-
-Phase 1 checks (per WORKFLOW.md):
-    * Schema — all 6 contract columns are present.
-    * Non-null — `text`, `label`, `source` have no nulls.
-    * Cardinality — `label` is in {negative, neutral, positive}.
-    * Range — `rating` (when present) is in [1, 5].
-
-Phase 2 expands this — see Step 9 (`# TODO (member)` hooks below).
+* ``validate_silver`` — Bronze → Silver gate (no ``label`` column).
+* ``validate_reviews`` — Silver → Gold / training / Postgres gate (requires ``label``).
 
 Owner: Charlie + Ha (Data & Eval).
-
-API note (for future maintainers):
-    We're using the *legacy* PandasDataset API. It's tiny and still ships in
-    GE 0.18, but is gone in GE 1.x. Migrate to the FluentDatasource pattern
-    when bumping the pin.
 """
 from __future__ import annotations
 
@@ -25,27 +11,32 @@ from dataclasses import dataclass, field
 from typing import List
 
 import pandas as pd
-from great_expectations.dataset import PandasDataset
 
-REQUIRED_COLUMNS = ["text", "label", "rating", "source", "restaurant", "location"]
-VALID_LABELS = ["negative", "neutral", "positive"]
+from data.ingest.ingest_reviews import (
+    EXPECTED_COLUMNS,
+    SILVER_COLUMNS_WITH_DATE,
+    SOURCE_ID_FIELD,
+    VALID_LABELS,
+)
+
+REQUIRED_COLUMNS = list(EXPECTED_COLUMNS)
+VALID_SOURCES = frozenset({"yelp", "malaysia", "replay", "google", "tripadvisor"})
+
 MIN_RATING = 1.0
 MAX_RATING = 5.0
-
-# --- Phase 2 (Step 9) bounds ---
-MIN_TEXT_LEN = 5         # below this is probably garbage ("ok", ".", "!")
-MAX_TEXT_LEN = 10_000    # above this is probably scraping noise
-HAS_LETTER_RE = r"[A-Za-z-￿]"  # latin or extended unicode letter
-ACCEPTED_LANGS = {"en", "ms", "id"}  # Indonesian shares vocab with Malay; langdetect often returns 'id' for short MY phrases
-LANG_MIN_SHARE = 0.80     # at least 80% of rows must be in ACCEPTED_LANGS
-LANG_SAMPLE_SIZE = 200    # cap detection to keep validation fast on big batches
+MIN_TEXT_LEN = 5
+MAX_TEXT_LEN = 10_000
+HAS_LETTER_RE = r"[A-Za-z\u00c0-\u024f]"
+ACCEPTED_LANGS = {"en", "ms", "id"}
+LANG_MIN_SHARE = 0.80
+LANG_SAMPLE_SIZE = 200
 
 
 @dataclass
 class ValidationResult:
-    """Compact, JSON-serialisable summary the DAG and tests both consume."""
+    """Compact summary the DAG, medallion driver, and tests all consume."""
     success: bool
-    n_rows: int
+    n_rows: int = 0
     failures: List[dict] = field(default_factory=list)
 
     def raise_for_status(self) -> None:
@@ -56,27 +47,92 @@ class ValidationResult:
             )
 
 
+def _failure_dict(expectation: str, *, kwargs=None, result=None, detail: str | None = None) -> dict:
+    if detail is not None:
+        return {"expectation": expectation, "detail": detail}
+    return {
+        "expectation": expectation,
+        "kwargs": kwargs,
+        "result": result,
+    }
+
+
+def validate_silver(df: pd.DataFrame, *, check_language: bool = True) -> ValidationResult:
+    """Run the Silver contract gate (no derived labels)."""
+    from great_expectations.dataset import PandasDataset
+
+    missing = [c for c in SILVER_COLUMNS_WITH_DATE if c not in df.columns]
+    if missing:
+        return ValidationResult(
+            False,
+            n_rows=len(df),
+            failures=[_failure_dict("schema", detail=f"missing columns: {missing}")],
+        )
+    if "label" in df.columns:
+        return ValidationResult(
+            False,
+            n_rows=len(df),
+            failures=[_failure_dict("schema", detail="silver must not contain a label column")],
+        )
+
+    contract = df[SILVER_COLUMNS_WITH_DATE].copy()
+    ds = PandasDataset(contract)
+    failures: List[dict] = []
+
+    def _run(name: str, result) -> None:
+        if not result.success:
+            failures.append(_failure_dict(name, result=result.result))
+
+    _run("text not null", ds.expect_column_values_to_not_be_null("text"))
+    _run(
+        "text length 1-5000",
+        ds.expect_column_value_lengths_to_be_between("text", min_value=1, max_value=5000),
+    )
+    _run("text_len not null", ds.expect_column_values_to_not_be_null("text_len"))
+    _run(
+        "text_len 1-5000",
+        ds.expect_column_values_to_be_between("text_len", min_value=1, max_value=5000),
+    )
+    _run(
+        "source in allowed set",
+        ds.expect_column_values_to_be_in_set("source", value_set=sorted(VALID_SOURCES)),
+    )
+    _run(
+        "rating in [1, 5]",
+        ds.expect_column_values_to_be_between("rating", min_value=1, max_value=5),
+    )
+    _run("restaurant not null", ds.expect_column_values_to_not_be_null("restaurant"))
+    _run("location not null", ds.expect_column_values_to_not_be_null("location"))
+    _run("source_id not null", ds.expect_column_values_to_not_be_null(SOURCE_ID_FIELD))
+
+    if check_language:
+        try:
+            import langdetect  # noqa: F401
+        except ImportError:
+            pass
+
+    return ValidationResult(success=len(failures) == 0, n_rows=len(df), failures=failures)
+
+
 def _run_expectations(df: pd.DataFrame) -> List[dict]:
-    """Run all Phase 1 expectations against `df`. Returns a list of GE results."""
+    """Run Phase-1 Gold / training expectations against ``df``."""
+    from great_expectations.dataset import PandasDataset
+
     ds = PandasDataset(df)
     results: List[dict] = []
 
-    # Schema
     for col in REQUIRED_COLUMNS:
         results.append(ds.expect_column_to_exist(col).to_json_dict())
 
-    # Non-null
     for col in ["text", "label", "source"]:
         if col in df.columns:
             results.append(ds.expect_column_values_to_not_be_null(col).to_json_dict())
 
-    # Label cardinality
     if "label" in df.columns:
         results.append(
-            ds.expect_column_values_to_be_in_set("label", VALID_LABELS).to_json_dict()
+            ds.expect_column_values_to_be_in_set("label", sorted(VALID_LABELS)).to_json_dict()
         )
 
-    # Rating range — allow nulls (mostly_<1 lets nulls slide), reject out-of-range
     if "rating" in df.columns:
         results.append(
             ds.expect_column_values_to_be_between(
@@ -84,27 +140,20 @@ def _run_expectations(df: pd.DataFrame) -> List[dict]:
             ).to_json_dict()
         )
 
-    # ---- Phase 2 additions (Step 9) ----
-    # Length bounds — catches "ok" / "..." junk and runaway scraped blobs.
     if "text" in df.columns:
         results.append(
             ds.expect_column_value_lengths_to_be_between(
                 "text", min_value=MIN_TEXT_LEN, max_value=MAX_TEXT_LEN
             ).to_json_dict()
         )
-
-    # Regex — must contain at least one letter. Rejects pure-emoji / pure-numeric rows.
-    if "text" in df.columns:
         results.append(
             ds.expect_column_values_to_match_regex("text", HAS_LETTER_RE).to_json_dict()
         )
 
-    # Cardinality — all 3 sentiment classes must appear. Otherwise training/eval
-    # split could be 2-class, which would break F1_macro reporting downstream.
     if "label" in df.columns:
         results.append(
             ds.expect_column_distinct_values_to_contain_set(
-                "label", VALID_LABELS
+                "label", sorted(VALID_LABELS)
             ).to_json_dict()
         )
 
@@ -117,11 +166,7 @@ def check_language_distribution(
     min_share: float = LANG_MIN_SHARE,
     sample_size: int = LANG_SAMPLE_SIZE,
 ) -> dict:
-    """Sample-based language check. Outside the GE suite because it's slow.
-
-    Returns the same shape GE results use so callers can append it uniformly.
-    Sample rather than scan-all — per-row language detection is ~1ms.
-    """
+    """Sample-based language check. Returns a GE-shaped result dict."""
     if "text" not in df.columns or len(df) == 0:
         return {
             "success": False,
@@ -133,7 +178,8 @@ def check_language_distribution(
         }
 
     from langdetect import DetectorFactory, LangDetectException, detect
-    DetectorFactory.seed = 0  # deterministic
+
+    DetectorFactory.seed = 0
 
     sample = df.sample(min(len(df), sample_size), random_state=42)
     detected = []
@@ -156,11 +202,7 @@ def check_language_distribution(
 
 
 def validate_reviews(df: pd.DataFrame, check_language: bool = True) -> ValidationResult:
-    """Run the suite and return a ValidationResult.
-
-    `check_language=False` is an escape hatch for callers that already
-    filter by language upstream (or in tests that don't care).
-    """
+    """Run the Gold / training / Postgres ingest gate."""
     expectations = _run_expectations(df)
     if check_language and "text" in df.columns and len(df) > 0:
         expectations.append(check_language_distribution(df))

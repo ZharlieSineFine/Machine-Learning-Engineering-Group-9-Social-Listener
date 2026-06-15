@@ -43,6 +43,7 @@ def test_baseline_trains_and_predicts():
     assert metrics["n_train"] > 0
     assert metrics["n_test"] > 0
     assert 0.0 <= metrics["f1_macro"] <= 1.0
+    assert 0.0 <= metrics["recall_neg"] <= 1.0
 
     preds = pipe.predict(["the food was amazing", "absolutely terrible service"])
     assert all(p in LABELS for p in preds)
@@ -53,6 +54,7 @@ def test_train_run_writes_artifact(tmp_path: Path):
     result = train_mod.run(data_path=SAMPLE_CSV, out_path=out)
     assert out.exists()
     assert result.f1_macro > 0
+    assert result.recall_neg > 0
     assert result.mlflow_run_id is None  # no MLflow in smoke test
 
 
