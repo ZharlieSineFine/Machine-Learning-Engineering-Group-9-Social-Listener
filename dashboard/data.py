@@ -34,7 +34,13 @@ _STOPWORDS = {
     "just", "only", "also", "really", "out", "than", "then", "there", "here",
     "what", "which", "when", "where", "who", "how", "why", "all", "any",
     "some", "more", "most", "much", "even", "still", "would", "could",
-    "should", "will", "can", "my", "our", "its",
+    "should", "will", "can", "my", "our", "its", "like", "are", "am",
+    "wasn't", "weren't", "don't", "doesn't", "didn't", "isn't", "aren't",
+    "went", "got", "get", "gotten", "make", "made", "see", "saw", "seen",
+    "it's", "i'm", "you're", "they're", "we're", "he's", "she's", "that's",
+    "one", "two", "i've", "you've", "they've", "we've", "he's", "she's", 
+    "because", "while", "although", "though", "even", "if", "unless", "until",
+    "first", "second", "good", "better", "now", "through", "store", "restaurant",
 }
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']{2,}")  # 3+ letter words
 
@@ -138,6 +144,7 @@ def sentiment_timeline(
         "n_reviews": grp.size().values,
         "pct_positive": grp.apply(lambda g: (g["label"] == "positive").mean() * 100).values,
         "pct_negative": grp.apply(lambda g: (g["label"] == "negative").mean() * 100).values,
+        "pct_neutral": grp.apply(lambda g: (g["label"] == "neutral").mean() * 100).values
     }).reset_index(drop=True)
     return out
 

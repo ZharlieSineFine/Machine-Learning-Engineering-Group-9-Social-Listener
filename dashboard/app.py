@@ -24,6 +24,7 @@ from typing import Optional
 import pandas as pd
 import requests
 import streamlit as st
+import plotly.graph_objects as go
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -36,14 +37,6 @@ from data import (
     negative_word_counts,
     sentiment_timeline,
 )
-
-st.write("GOLD_ROOT:", os.getenv("GOLD_ROOT", "NOT SET"))
-st.write("Gold path exists:", Path(os.getenv("GOLD_ROOT", "/repo_data/gold")).exists())
-
-test_df = load_reviews(gold_root=Path(os.getenv("GOLD_ROOT")), days=14)
-st.write("Rows loaded:", len(test_df))
-st.write("Columns:", test_df.columns.tolist())
-st.write(test_df.head(2))
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -199,12 +192,12 @@ def _load(days: int) -> pd.DataFrame:
     db   = os.getenv("POSTGRES_DB")
     if all([user, pw, host, db]):
         dsn = f"postgresql://{user}:{pw}@{host}:{port}/{db}"
+        
     return load_reviews(
         dsn=dsn,
-        gold_root=ROOT / "data" / "gold",
+        gold_root=DEFAULT_GOLD_ROOT,
         days=days,
     )
- 
  
 # ---------------------------------------------------------------------------
 # Section renderers
@@ -283,34 +276,84 @@ def render_kpi_tiles(df: pd.DataFrame) -> None:
     c4.metric("Neutral sentiment", f"{pct_neu:.1f}%")
  
  
-def render_timeline(
-    df: pd.DataFrame, freq: str = "D", time_col: str = "ingested_at",
-) -> pd.DataFrame:
-    df = df.copy()
-    if time_col not in df.columns:
-        df[time_col] = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df), freq="h")
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-    df = df.dropna(subset=[time_col, "label"])
-
-    df["period"] = df[time_col].dt.to_period(freq).dt.to_timestamp()
-    grp = df.groupby("period")
-
-    total    = grp["label"].count()
-    positive = grp["label"].apply(lambda s: (s == "positive").sum())
-    negative = grp["label"].apply(lambda s: (s == "negative").sum())
-    neutral  = grp["label"].apply(lambda s: (s == "neutral").sum())
-
-    out = pd.DataFrame({
-        "period":       total.index,
-        "n_reviews":    total.values,
-        "pct_positive": (positive / total * 100).values,
-        "pct_negative": (negative / total * 100).values,
-        "pct_neutral":  (neutral  / total * 100).values,
-    }).reset_index(drop=True)
-    return out
+def render_timeline(df: pd.DataFrame) -> None:
+    freq = st.radio(
+        "Group by",
+        ["D", "W"],
+        format_func={"D": "Daily", "W": "Weekly"}.get,
+        horizontal=True,
+        key="timeline_freq",
+        label_visibility="collapsed",
+    )
+ 
+    days = DAYS_BY_FREQ[freq]
+    label = "14 days" if freq == "D" else "8 weeks"
+    inner = _section_title("📈", f"Sentiment trend — {label}")
+ 
+    # Reload with the right window for the selected frequency.
+    # _load is cached so switching back is instant.
+    df = _load(days)
+    timeline = sentiment_timeline(df, freq=freq, time_col="review_date")
+ 
+    fig = go.Figure()
+ 
+    if not timeline.empty:
+        fig.add_trace(go.Scatter(
+            x=timeline["period"], y=timeline["pct_positive"],
+            name="Positive", mode="lines+markers",
+            line=dict(color=TEAL, width=2),
+            marker=dict(size=4),
+        ))
+        fig.add_trace(go.Scatter(
+            x=timeline["period"], y=timeline["pct_neutral"],
+            name="Neutral", mode="lines+markers",
+            line=dict(color=AMBER, width=2, dash="dot"),
+            marker=dict(size=4),
+        ))
+        fig.add_trace(go.Scatter(
+            x=timeline["period"], y=timeline["pct_negative"],
+            name="Negative", mode="lines+markers",
+            line=dict(color=RED, width=2, dash="dash"),
+            marker=dict(size=4, symbol="diamond"),
+        ))
+        # Threshold reference line
+        fig.add_hline(
+            y=NEGATIVE_THRESHOLD,
+            line_dash="dash", line_color=RED,
+            line_width=1, opacity=0.35,
+        )
+ 
+    fig.update_layout(
+        height=260,
+        margin=dict(l=0, r=0, t=4, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_SEC, size=11),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            font=dict(color=TEXT_SEC, size=11),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        yaxis=dict(
+            range=[0, 100], ticksuffix="%",
+            gridcolor=BORDER, gridwidth=1,
+            color=TEXT_SEC,
+        ),
+        xaxis=dict(showgrid=False, color=TEXT_SEC),
+        hovermode="x unified",
+    )
+ 
+    st.markdown(
+        f'<div style="background:{CARD_BG};border:1px solid {BORDER};'
+        f'border-radius:10px;padding:1rem 1.2rem;">'
+        f'{inner}',
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.markdown("</div>", unsafe_allow_html=True)
  
  
-def render_alerts(df: pd.DataFrame, n: int = 6) -> None:
+def render_alerts(df: pd.DataFrame, n: int = 4) -> None:
     inner = _section_title("🔔", "Alerts (last batch)")
  
     neg = df[df["label"] == "negative"].copy()
@@ -509,7 +552,7 @@ def main() -> None:
     # Default load uses the daily window (14 days).
     # render_timeline() will call _load() again with 60 days if weekly is selected —
     # _load is cached so the extra call costs nothing on repeated toggles.
-    df = _load(DAYS_BY_FREQ["D"])
+    df = _load(DAYS_BY_FREQ["W"])
     pct_neg = _pct(df, "negative")
  
     # ── Header ──────────────────────────────────────────────────────────────
@@ -528,7 +571,7 @@ def main() -> None:
     with col_left:
         render_timeline(df)
     with col_right:
-        render_alerts(df, n=6)
+        render_alerts(df, n=4)
  
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
  
