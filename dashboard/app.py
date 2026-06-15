@@ -31,7 +31,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 DEFAULT_GOLD_ROOT = Path(os.getenv("GOLD_ROOT", str(ROOT / "data" / "gold")))
- 
+
+DEFAULT_DEMO_CSV = Path(os.getenv("DEMO_CSV", str(ROOT / "data" / "sample" / "reviews_sample.csv")))
+
 from data import (
     load_reviews,
     negative_word_counts,
@@ -183,7 +185,7 @@ def _section_title(icon: str, title: str) -> str:
 # ---------------------------------------------------------------------------
  
 @st.cache_data(ttl=300)   # refresh every 5 minutes
-def _load(days: int) -> pd.DataFrame:
+def _load(days: int, csv_path: str = "") -> pd.DataFrame:
     dsn = None
     user = os.getenv("POSTGRES_USER")
     pw   = os.getenv("POSTGRES_PASSWORD")
@@ -195,7 +197,8 @@ def _load(days: int) -> pd.DataFrame:
         
     return load_reviews(
         dsn=dsn,
-        gold_root=DEFAULT_GOLD_ROOT,
+        gold_root=DEFAULT_GOLD_ROOT if not csv_path else None,
+        csv_path=Path(csv_path) if csv_path else None,
         days=days,
     )
  
@@ -276,7 +279,7 @@ def render_kpi_tiles(df: pd.DataFrame) -> None:
     c4.metric("Neutral sentiment", f"{pct_neu:.1f}%")
  
  
-def render_timeline(df: pd.DataFrame) -> None:
+def render_timeline(df: pd.DataFrame, csv_path: str = "") -> None:
     freq = st.radio(
         "Group by",
         ["D", "W"],
@@ -285,14 +288,12 @@ def render_timeline(df: pd.DataFrame) -> None:
         key="timeline_freq",
         label_visibility="collapsed",
     )
- 
+
     days = DAYS_BY_FREQ[freq]
     label = "14 days" if freq == "D" else "8 weeks"
     inner = _section_title("📈", f"Sentiment trend — {label}")
- 
-    # Reload with the right window for the selected frequency.
-    # _load is cached so switching back is instant.
-    df = _load(days)
+
+    df = _load(days, csv_path=csv_path)
     timeline = sentiment_timeline(df, freq=freq, time_col="review_date")
  
     fig = go.Figure()
@@ -403,25 +404,21 @@ def render_alerts(df: pd.DataFrame, n: int = 4) -> None:
  
 def render_word_cloud(df: pd.DataFrame) -> None:
     inner = _section_title("A", "Top words in negative posts")
- 
-    counts = negative_word_counts(df, top_n=80)
- 
+    counts = negative_word_counts(df, top_n=15)
+
     if not counts:
         _card(inner + f'<p style="color:{TEXT_SEC};font-size:13px;">No negative reviews.</p>')
         return
- 
+
     try:
         from wordcloud import WordCloud
-        import numpy as np
-        from PIL import Image
         import io
- 
+
         wc = WordCloud(
             width=900, height=280,
             background_color="#1E2128",
-            colormap=None,
-            color_func=lambda *args, **kwargs: _wc_color(kwargs.get("word", "")),
-            max_words=60,
+            color_func=lambda *args, **kwargs: AMBER,
+            max_words=15,
             collocations=False,
         ).generate_from_frequencies(counts)
  
@@ -463,14 +460,6 @@ def render_word_cloud(df: pd.DataFrame) -> None:
         st.markdown("</div>", unsafe_allow_html=True)
  
  
-def _wc_color(word: str) -> str:
-    """Colour words red/amber based on rough severity ranking."""
-    high = {"terrible", "awful", "worst", "horrible", "disgusting", "rude", "wrong", "cold"}
-    if word.lower() in high:
-        return RED
-    return AMBER
- 
- 
 def render_topic_breakdown() -> None:
     inner = _section_title("🏷", "Topic breakdown (24h)")
     placeholder = f"""
@@ -487,72 +476,31 @@ def render_topic_breakdown() -> None:
         </p>
     </div>"""
     _card(inner + placeholder)
- 
- 
-def render_prediction_probe() -> None:
-    st.markdown(
-        f'<p style="font-size:12px;font-weight:600;color:{TEXT_SEC};'
-        f'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem;">'
-        f'🔍 &nbsp;&nbsp;LIVE PREDICTION PROBE</p>',
-        unsafe_allow_html=True,
-    )
- 
-    text = st.text_area(
-        "Review text",
-        value="The brown sugar milk tea tasted watered down today.",
-        height=90,
-        key="probe_text",
-        label_visibility="collapsed",
-    )
- 
-    if st.button("Run prediction", type="primary"):
-        if not text.strip():
-            st.warning("Please enter some text first.")
-            return
-        try:
-            resp = requests.post(f"{API_URL}/predict", json={"text": text}, timeout=5)
-            resp.raise_for_status()
-            label = resp.json().get("label", "unknown")
-            colour = {
-                "positive": TEAL, "negative": RED, "neutral": AMBER
-            }.get(label, TEXT_SEC)
-            st.markdown(
-                f"""<div style="background:{colour}22;border:1px solid {colour}66;
-                    border-radius:8px;padding:12px 16px;margin-top:8px;">
-                    <p style="margin:0;font-size:20px;font-weight:700;color:{colour};">
-                        {label.upper()}
-                    </p>
-                    <p style="margin:2px 0 0;font-size:11px;color:{TEXT_SEC};">
-                        from {API_URL}/predict
-                    </p></div>""",
-                unsafe_allow_html=True,
-            )
-        except requests.exceptions.ConnectionError:
-            st.error(f"Cannot reach the API at `{API_URL}`. Run `docker compose up api`.")
-        except Exception as exc:
-            st.error(f"Error: {exc}")
- 
-    with st.expander("Health check"):
-        if st.button("Ping /health"):
-            try:
-                h = requests.get(f"{API_URL}/health", timeout=3)
-                h.raise_for_status()
-                data = h.json()
-                ca, cb = st.columns(2)
-                ca.metric("Status", data.get("status", "—"))
-                cb.metric("Model loaded", "Yes" if data.get("model_loaded") else "No")
-            except Exception as exc:
-                st.error(f"Health check failed: {exc}")
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
  
 def main() -> None:
+    demo_root = Path(os.getenv("DEMO_DATA_ROOT", str(ROOT / "data" / "demo_data")))
+    demo_files = {
+        "Stable (normal sentiment)": str(demo_root / "demo_jun2026_stable.csv"),
+        "Spike (Jun 21 crisis)":     str(demo_root / "demo_jun2026_spike.csv"),
+        "Original sample (2022)":    str(demo_root / "demo_holdout_full.csv"),
+    }
+    chosen = st.radio(
+        "🎬 Demo dataset",
+        list(demo_files.keys()),
+        horizontal=True,
+        index=0,
+        key="demo_choice",
+    )
+    csv_path = demo_files[chosen]
+
     # Default load uses the daily window (14 days).
     # render_timeline() will call _load() again with 60 days if weekly is selected —
     # _load is cached so the extra call costs nothing on repeated toggles.
-    df = _load(DAYS_BY_FREQ["W"])
+    df = _load(DAYS_BY_FREQ["W"], csv_path=csv_path)
     pct_neg = _pct(df, "negative")
  
     # ── Header ──────────────────────────────────────────────────────────────
@@ -569,7 +517,7 @@ def main() -> None:
     # on a 14-day window regardless of the chart toggle.
     col_left, col_right = st.columns([1.45, 1])
     with col_left:
-        render_timeline(df)
+        render_timeline(df, csv_path=csv_path)
     with col_right:
         render_alerts(df, n=4)
  
@@ -583,14 +531,6 @@ def main() -> None:
         render_word_cloud(df)
  
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
- 
-    # ── Developer tools (collapsed — not part of marketing view) ────────────
-    with st.expander("🔧 Developer tools", expanded=False):
-        st.caption(
-            "For demo and grading purposes only — "
-            "verify the API is live and test predictions directly."
-        )
-        render_prediction_probe()
  
     # ── Footer ──────────────────────────────────────────────────────────────
     st.markdown(

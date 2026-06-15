@@ -182,6 +182,7 @@ services:
       API_URL: http://api:8000
       POSTGRES_HOST: postgres
       GOLD_ROOT: /repo_data/gold
+      DEMO_DATA_ROOT: /repo_data/demo_data
     ports:
       - "8501:8501"
     depends_on:
