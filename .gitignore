@@ -80,6 +80,7 @@ Malaysia Restaurant Review Datasets/
 data/bronze/
 data/silver/
 data/gold/
+data/demo_data/
 
 # ---------- Great Expectations local state ----------
 data/expectations/uncommitted/
