@@ -77,6 +77,9 @@ airflow/webserver_config.py
 # 227 MB — distribute via release asset / S3 / DVC, not git.
 # The smoke test uses data/sample/reviews_sample.csv (kept in repo).
 Malaysia Restaurant Review Datasets/
+data/bronze/
+data/silver/
+data/gold/
 
 # ---------- Great Expectations local state ----------
 data/expectations/uncommitted/
