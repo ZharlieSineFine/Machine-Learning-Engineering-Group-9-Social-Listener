@@ -90,6 +90,7 @@ data/bronze/
 data/silver/
 data/gold/
 *.parquet
+data/demo_data/
 
 # ---------- Great Expectations local state ----------
 data/expectations/uncommitted/
