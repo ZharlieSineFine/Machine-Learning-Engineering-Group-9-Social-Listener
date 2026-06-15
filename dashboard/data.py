@@ -17,8 +17,11 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from datetime import date, timedelta
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SAMPLE_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
+DEFAULT_GOLD_ROOT = ROOT / "data" / "gold"
 
 # Stopwords for the negative-reviews word cloud. Intentionally tiny — the
 # team can swap in NLTK or spaCy's full English stopword list in Phase 3.
@@ -38,29 +41,78 @@ _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']{2,}")  # 3+ letter words
 
 # ---------- review data ----------
 
-def load_reviews(dsn: Optional[str] = None, csv_path: Optional[Path] = None) -> pd.DataFrame:
-    """Postgres first (the "live" source), CSV fallback (offline / demo)."""
+def load_reviews(
+    dsn: Optional[str] = None,
+    gold_root: Optional[Path] = None,
+    csv_path: Optional[Path] = None,
+    days: int = 14,
+) -> pd.DataFrame:
+    """Postgres first, Gold parquet second, CSV fallback last."""
     if dsn:
         try:
-            import psycopg2  # noqa: F401  (import-side dep advertised in requirements)
-            from sqlalchemy import create_engine
-
+            from sqlalchemy import create_engine, text
             engine = create_engine(dsn)
             with engine.connect() as conn:
                 return pd.read_sql(
-                    "SELECT text, label, rating, source, ingested_at "
-                    "FROM reviews ORDER BY ingested_at",
+                    text(
+                        "SELECT text, label, source, ingested_at AS review_date "
+                        "FROM reviews WHERE ingested_at >= NOW() - INTERVAL ':days days' "
+                        "ORDER BY ingested_at"
+                    ),
                     conn,
+                    params={"days": days},
                 )
         except Exception as exc:
-            print(f"[dashboard.data] Postgres unavailable ({exc}); falling back to CSV")
+            print(f"[dashboard.data] Postgres unavailable ({exc}); trying Gold parquet")
+
+    resolved_gold = gold_root or DEFAULT_GOLD_ROOT
+    df = _load_gold_parquet(resolved_gold, days=days)
+    if df is not None and not df.empty:
+        return df
 
     csv_path = csv_path or DEFAULT_SAMPLE_CSV
     if not csv_path.exists():
-        return pd.DataFrame(columns=["text", "label", "rating", "source"])
+        return pd.DataFrame(columns=["text", "label", "review_date"])
     df = pd.read_csv(csv_path)
+    if "review_date" not in df.columns and "date" in df.columns:
+        df = df.rename(columns={"date": "review_date"})
     return df
 
+def _load_gold_parquet(gold_root: Path, days: int) -> Optional[pd.DataFrame]:
+    feature_root = gold_root / "feature_store"
+    label_root = gold_root / "label_store"
+
+    if not feature_root.exists() or not label_root.exists():
+        return None
+
+    all_dates = sorted(
+        d.name.replace("review_date=", "")
+        for d in feature_root.iterdir()
+        if d.is_dir() and d.name.startswith("review_date=")
+    )
+    if not all_dates:
+        return None
+
+    latest = date.fromisoformat(all_dates[-1])
+    cutoff = (latest - timedelta(days=days - 1)).isoformat()
+    target_dates = [d for d in all_dates if d >= cutoff]
+
+    feat_frames, lab_frames = [], []
+    for d in target_dates:
+        fp = feature_root / f"review_date={d}" / "part.parquet"
+        lp = label_root / f"review_date={d}" / "part.parquet"
+        if fp.exists() and lp.exists():
+            feat_frames.append(pd.read_parquet(fp, columns=["review_id", "review_date", "text"]))
+            lab_frames.append(pd.read_parquet(lp, columns=["review_id", "label"]))
+
+    if not feat_frames:
+        return None
+
+    feat = pd.concat(feat_frames, ignore_index=True)
+    lab = pd.concat(lab_frames, ignore_index=True)
+    df = feat.merge(lab[["review_id", "label"]], on="review_id", how="inner")
+    df["review_date"] = pd.to_datetime(df["review_date"], errors="coerce")
+    return df
 
 # ---------- timeline ----------
 

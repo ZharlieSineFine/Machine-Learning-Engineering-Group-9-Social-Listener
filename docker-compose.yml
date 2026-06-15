@@ -181,11 +181,14 @@ services:
     environment:
       API_URL: http://api:8000
       POSTGRES_HOST: postgres
+      GOLD_ROOT: /repo_data/gold
     ports:
       - "8501:8501"
     depends_on:
       api:
         condition: service_started
+    volumes:
+      - ./data:/repo_data
 
   smoke:
     # Phase 1 smoke test. Runs tests/test_smoke.py in an isolated container
