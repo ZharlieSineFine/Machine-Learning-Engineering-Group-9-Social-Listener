@@ -54,13 +54,7 @@ def test_compute_metrics_shape():
     )
     labels = np.array([0, 1, 2, 0])
     metrics = _compute_metrics((logits, labels))
-<<<<<<< HEAD
-    assert set(metrics) >= {
-        "accuracy", "f1_macro", "f1_negative", "f1_neg", "precision_neg", "recall_neg",
-    }
-=======
     assert {"accuracy", "f1_macro"}.issubset(metrics)
->>>>>>> origin/feature/full_flow
     assert metrics["accuracy"] == 1.0  # all argmaxes match
     assert 0.0 <= metrics["f1_macro"] <= 1.0
     assert metrics["recall_neg"] == 1.0
