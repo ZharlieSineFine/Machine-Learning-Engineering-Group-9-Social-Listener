@@ -220,6 +220,12 @@ services:
       - ./data:/opt/project/data
       - ${YELP_DATA_HOST:-../../Yelp_JSON}:/data/raw/yelp:ro
       - ${TRIPADVISOR_DATA_HOST:-../../TripAdvisor_data_cleaned.csv}:/data/raw/tripadvisor:ro
+    # Up postgres + minio first so `--publish` can reach them on the docker network.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     profiles: ["pipeline"]
 
 volumes:

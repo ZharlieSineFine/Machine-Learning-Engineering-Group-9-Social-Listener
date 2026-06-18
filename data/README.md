@@ -125,6 +125,37 @@ Rows with unparseable dates land in `review_date=__null__` and join the in-time 
 
 | **Gold** — per-review features + labels | `refine/build_gold.py` | `data/gold/feature_store/` + `data/gold/label_store/` |
 
+## Publishing to MinIO + Postgres
+
+The on-disk medallion under `data/` is the working copy. `data/publish.py` (backed by the
+`data/storage/` package) mirrors it to the **MinIO** object store and upserts the Silver /
+Gold tables into **Postgres** — the layout ARCHITECTURE.md §3/§7 targets.
+
+| What | Where |
+|---|---|
+| Bronze / Silver / Gold objects | MinIO `s3://datasets/{bronze, silver/reviews, gold}/…` (mirrors the on-disk Hive paths) |
+| Harmonised reviews (no labels) | Postgres `reviews_silver`, PK `(source, source_id)` |
+| Training set (features + label) | Postgres `reviews_gold`, PK `review_id` (= Silver `source_id`) |
+
+Connection settings come from the env (`infra/.env.example` → `data/storage/config.py`).
+Inside the docker network the hosts are the service aliases (`postgres`, `minio`); for a
+host-side run, override `POSTGRES_HOST=localhost` and `MLFLOW_S3_ENDPOINT_URL=http://localhost:9000`.
+
+```bash
+# whole local medallion -> MinIO + Postgres
+python -m data.publish --to all
+
+# host-side (containers up), against the mapped ports
+POSTGRES_HOST=localhost MLFLOW_S3_ENDPOINT_URL=http://localhost:9000 python -m data.publish --to all
+
+# or publish as part of a daily run (only the partitions it touched)
+python -m data.run_daily --run-date 2026-06-21 --sources tripadvisor --publish
+```
+
+Upserts are idempotent (`ON CONFLICT … DO UPDATE`), so re-publishing a date is safe. The
+DDL is applied by `infra/docker/postgres/init.sql` on first boot **and** by
+`data/storage/warehouse.ensure_schema`, so the publisher is self-sufficient.
+
 
 
 ## Sources (Phase 2 onwards)

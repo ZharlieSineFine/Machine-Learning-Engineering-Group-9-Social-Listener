@@ -281,6 +281,14 @@ human_corrections (
 
 The training DAG joins `reviews_gold` with `human_corrections` and prefers human labels when present — that's how the feedback loop closes. The Gold builder derives `label` from `rating` (`<=2 → negative`, `3 → neutral`, `>=4 → positive`) via `label_from_rating()` in `data/refine/build_gold.py`.
 
+> **Implemented schema (prototype).** The medallion keys on the loaders' natural **string**
+> ids, so the live `reviews_silver` / `reviews_gold` tables (DDL in
+> `infra/docker/postgres/init.sql`, mirrored in `data/storage/warehouse.py`) use
+> `PRIMARY KEY (source, source_id)` and `review_id` (= Silver `source_id`) rather than the
+> `BIGSERIAL` ids sketched above, and **Silver carries no `label`** (labels live only in
+> Gold). `data/publish.py` populates these tables and mirrors the bronze/silver/gold objects
+> to MinIO `s3://datasets/…` from the on-disk medallion (see [data/README.md](../data/README.md#publishing-to-minio--postgres)).
+
 ---
 
 ## 8. Environments
