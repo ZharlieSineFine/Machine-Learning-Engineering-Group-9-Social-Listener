@@ -84,7 +84,10 @@ VALID_LABELS = frozenset({"negative", "neutral", "positive"})
 
 # Match the lower bound enforced by the GE suite (data/expectations/reviews_suite.py).
 MIN_TEXT_LEN = 5
-HAS_LETTER_RE = r"[A-Za-z\u00c0-\u024f]"
+# Non-raw on purpose: the \u escapes decode to literal chars at import, so the pattern
+# works under both Python's re engine (pandas <3) and pyarrow's RE2 (pandas 3, which
+# rejects a literal "\u" escape and would otherwise raise ArrowInvalid in str.contains).
+HAS_LETTER_RE = "[A-Za-z\u00c0-\u024f]"
 
 
 def utc_now_iso() -> str:

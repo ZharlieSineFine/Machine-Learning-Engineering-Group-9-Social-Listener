@@ -14,6 +14,7 @@ import pandas as pd
 
 from data.ingest.ingest_reviews import (
     EXPECTED_COLUMNS,
+    HAS_LETTER_RE,
     SILVER_COLUMNS_WITH_DATE,
     SOURCE_ID_FIELD,
     VALID_LABELS,
@@ -26,7 +27,8 @@ MIN_RATING = 1.0
 MAX_RATING = 5.0
 MIN_TEXT_LEN = 5
 MAX_TEXT_LEN = 10_000
-HAS_LETTER_RE = r"[A-Za-z\u00c0-\u024f]"
+# HAS_LETTER_RE imported from data.ingest.ingest_reviews (single source of truth; the
+# non-raw form is pyarrow/RE2-safe under pandas 3).
 ACCEPTED_LANGS = {"en", "ms", "id"}
 LANG_MIN_SHARE = 0.80
 LANG_SAMPLE_SIZE = 200
@@ -183,7 +185,12 @@ def check_language_distribution(
 
     sample = df.sample(min(len(df), sample_size), random_state=42)
     detected = []
-    for text in sample["text"].astype(str):
+    for text in sample["text"]:
+        # pandas 3 keeps NaN as a float through .astype(str), so guard non-str/blank
+        # explicitly — a null/empty review isn't an accepted-language review.
+        if not isinstance(text, str) or not text.strip():
+            detected.append("unknown")
+            continue
         try:
             detected.append(detect(text))
         except LangDetectException:
