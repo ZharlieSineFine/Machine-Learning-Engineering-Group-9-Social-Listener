@@ -24,7 +24,7 @@ data/
 
 │   ├── malaysia_review_loader.py # Malaysia TripAdvisor → raw reviews.csv (+ provenance)
 
-│   └── replay.py
+│   └── replay.py     # Replay simulator: demo_data (stable/spike) -> data/replay/<scenario>/
 
 ├── refine/         # BRONZE → SILVER → GOLD. Join, clean, dedup, label derivation.
 
@@ -117,7 +117,7 @@ Rows with unparseable dates land in `review_date=__null__` and join the in-time 
 
 |---|---|---|
 
-| **Sources** | external; replay simulator (`ingest/replay.py`) | URLs / `data/sample/` |
+| **Sources** | external; replay simulator (`ingest/replay.py`) | URLs / `data/sample/` (seed); `demo_data/` (replay stable/spike windows) |
 
 | **Bronze** — raw + provenance | `ingest/*.py`, `run_daily.py` | MinIO `s3://datasets/bronze/{source}/dt={YYYY-MM-DD}/` |
 
@@ -292,6 +292,6 @@ Change a contract column? Open a PR that updates the CSV, the Pydantic schemas i
 
 
 
-`data/sample/reviews_sample.csv` is committed (~1k labelled rows) so the smoke test never needs network. The Phase 2 `replay` simulator reads from this same shape.
+`data/sample/reviews_sample.csv` is committed (~1k labelled rows) so the smoke test never needs network. The Phase 2 `replay` simulator instead replays the purpose-built demo windows in `demo_data/` (`stable` / `spike`) — see [ARCHITECTURE.md §Replay simulator](../ARCHITECTURE.md).
 
 
