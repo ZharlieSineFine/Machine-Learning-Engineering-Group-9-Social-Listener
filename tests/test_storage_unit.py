@@ -131,3 +131,10 @@ def test_read_gold_merges_feature_and_label(tmp_path):
     row = g.iloc[0]
     assert row["review_id"] == "r1" and row["label"] == "positive" and row["text"] == "good"
     assert row["text_len"] == 4 and row["label_source"] == "derived_from_rating"
+
+
+def test_publish_run_is_noop_without_env():
+    # No POSTGRES_*/AWS_* in the supplied env -> publish_run degrades to a safe no-op
+    # (a daily run without services configured still succeeds).
+    out = publish.publish_run(["2020-01-01"], "2026-06-21", env={})
+    assert out == {"published_minio": None, "published_postgres": None}
