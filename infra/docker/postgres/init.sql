@@ -60,3 +60,49 @@ CREATE TABLE IF NOT EXISTS monitoring_reports (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS monitoring_reports_run_date_idx ON monitoring_reports (run_date DESC);
+
+-- =========================================================================
+-- reviews_silver — harmonised, deduped reviews published from the medallion
+-- (data/publish.py). NO labels (labels live in Gold). Keyed by the loader's
+-- natural key (source, source_id). Mirrors data/storage/warehouse.py DDL.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS reviews_silver (
+    source       TEXT NOT NULL,
+    source_id    TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    text_len     INTEGER,
+    rating       REAL,
+    restaurant   TEXT,
+    location     TEXT,
+    review_date  TEXT,
+    ingested_at  TEXT,
+    PRIMARY KEY (source, source_id)
+);
+CREATE INDEX IF NOT EXISTS reviews_silver_review_date_idx ON reviews_silver (review_date);
+
+-- =========================================================================
+-- reviews_gold — per-review training set (feature_store + label_store joined).
+-- review_id == Silver source_id. Label derived from rating in Gold.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS reviews_gold (
+    review_id    TEXT PRIMARY KEY,
+    review_date  TEXT,
+    text         TEXT NOT NULL,
+    label        TEXT NOT NULL CHECK (label IN ('negative', 'neutral', 'positive')),
+    label_source TEXT NOT NULL DEFAULT 'derived_from_rating',
+    text_len     INTEGER,
+    built_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS reviews_gold_review_date_idx ON reviews_gold (review_date);
+CREATE INDEX IF NOT EXISTS reviews_gold_label_idx       ON reviews_gold (label);
+
+-- =========================================================================
+-- human_corrections — reviewer fixes that feed the next training run.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS human_corrections (
+    id              BIGSERIAL PRIMARY KEY,
+    review_id       TEXT NOT NULL,
+    corrected_label TEXT NOT NULL CHECK (corrected_label IN ('negative', 'neutral', 'positive')),
+    corrected_by    TEXT,
+    corrected_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

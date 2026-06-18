@@ -70,6 +70,7 @@ def run_daily(
     skip_ge: bool = False,
     location_with_state: bool = False,
     recent_years: Optional[float] = DEFAULT_SILVER_RECENT_YEARS,
+    publish: bool = False,
 ) -> dict:
     """Execute the daily pipeline for one ingestion date.
 
@@ -93,6 +94,18 @@ def run_daily(
     if affected:
         process_review_dates(silver_root, gold_root, affected)
 
+    publish_summary = None
+    if publish and affected:
+        from data.publish import publish_run  # lazy: boto3/psycopg2 only needed with --publish
+
+        publish_summary = publish_run(
+            sorted(affected),
+            run_date,
+            bronze_root=bronze_root,
+            silver_root=silver_root,
+            gold_root=gold_root,
+        )
+
     counts = {}
     for key in affected:
         silver = read_silver_partition(silver_partition_path(silver_root, key))
@@ -106,6 +119,7 @@ def run_daily(
         "silver_row_counts": counts,
         "total_silver_rows": total_silver,
         "recent_years": recent_years,
+        "publish": publish_summary,
     }
 
 
@@ -216,6 +230,11 @@ def main() -> None:
         action="store_true",
         help="Keep full Bronze history in Silver (disable per-source recency filter).",
     )
+    ap.add_argument(
+        "--publish",
+        action="store_true",
+        help="After building, publish affected partitions to MinIO + Postgres (needs env configured).",
+    )
     args = ap.parse_args()
     recent_years = None if args.all_years else args.recent_years
 
@@ -230,6 +249,7 @@ def main() -> None:
             skip_ge=args.skip_ge,
             location_with_state=args.location_with_state,
             recent_years=recent_years,
+            publish=args.publish,
         )
     except DailyRunError as exc:
         print(str(exc), file=sys.stderr)
@@ -242,6 +262,8 @@ def main() -> None:
     )
     for key, n in summary["silver_row_counts"].items():
         print(f"  review_date={key}: {n} silver rows")
+    if summary.get("publish"):
+        print(f"Published: {summary['publish']}")
 
 
 if __name__ == "__main__":

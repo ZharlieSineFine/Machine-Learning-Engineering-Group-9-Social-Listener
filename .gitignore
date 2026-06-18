@@ -87,6 +87,7 @@ Malaysia Restaurant Review Datasets/
 data/bronze/
 data/silver/
 data/gold/
+data/replay/
 *.parquet
 
 # ---------- Great Expectations local state ----------
