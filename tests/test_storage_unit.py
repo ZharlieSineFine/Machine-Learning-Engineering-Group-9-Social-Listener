@@ -138,3 +138,58 @@ def test_publish_run_is_noop_without_env():
     # (a daily run without services configured still succeeds).
     out = publish.publish_run(["2020-01-01"], "2026-06-21", env={})
     assert out == {"published_minio": None, "published_postgres": None}
+
+
+# ---------- object-store mirroring (fake S3 client, no MinIO needed) ----------
+
+class _FakeS3:
+    """Minimal stand-in for a boto3 S3 client: records uploads, fakes bucket existence."""
+
+    def __init__(self):
+        self.uploaded = []
+        self.buckets = set()
+
+    def head_bucket(self, Bucket):
+        from botocore.exceptions import ClientError
+        if Bucket not in self.buckets:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
+
+    def create_bucket(self, Bucket):
+        self.buckets.add(Bucket)
+
+    def upload_file(self, filename, bucket, key):
+        self.uploaded.append((bucket, key))
+
+
+def test_mirror_tree_uploads_relpaths_under_prefix(tmp_path):
+    from data.storage.objectstore import mirror_tree
+    part = tmp_path / "review_date=2020-01-01"
+    part.mkdir()
+    (part / "part.parquet").write_bytes(b"x")
+    fake = _FakeS3()
+    n = mirror_tree(fake, tmp_path, "silver/reviews", bucket="datasets")
+    assert n == 1
+    assert fake.uploaded == [("datasets", "silver/reviews/review_date=2020-01-01/part.parquet")]
+
+
+def test_publish_objects_mirrors_each_layer_with_prefix(tmp_path):
+    bronze = tmp_path / "bronze" / "yelp"
+    bronze.mkdir(parents=True)
+    (bronze / "reviews.csv").write_bytes(b"a")
+    silver = tmp_path / "silver" / "review_date=2020-01-01"
+    silver.mkdir(parents=True)
+    (silver / "part.parquet").write_bytes(b"b")
+    gold = tmp_path / "gold" / "feature_store" / "review_date=2020-01-01"
+    gold.mkdir(parents=True)
+    (gold / "part.parquet").write_bytes(b"c")
+
+    fake = _FakeS3()
+    written = publish.publish_objects(
+        fake, bronze_root=tmp_path / "bronze", silver_root=tmp_path / "silver", gold_root=tmp_path / "gold"
+    )
+    assert written == {"bronze": 1, "silver": 1, "gold": 1}
+    assert "datasets" in fake.buckets  # ensure_bucket created it
+    keys = [k for _, k in fake.uploaded]
+    assert "bronze/yelp/reviews.csv" in keys
+    assert "silver/reviews/review_date=2020-01-01/part.parquet" in keys
+    assert "gold/feature_store/review_date=2020-01-01/part.parquet" in keys
