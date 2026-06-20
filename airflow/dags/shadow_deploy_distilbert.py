@@ -164,7 +164,8 @@ with DAG(
     dag_id="shadow_deploy_distilbert",
     description="Fine-tune DistilBERT challenger -> register MLflow Staging (shadow)",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
+    # Challenger retrains weekly alongside the baseline, not every 6h.
+    schedule="0 3 * * 0",  # Sundays 03:00
     catchup=False,
     default_args={
         "owner": "data",

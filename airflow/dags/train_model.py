@@ -45,9 +45,11 @@ def _task_train(**_context) -> dict:
 
 with DAG(
     dag_id="train_model",
-    description="Every-6h retrain of the logreg sentiment baseline + MLflow register",
+    description="Manual-only train + register utility (medallion_train_cycle is the scheduled retrain)",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
+    # Manual/trigger-only. The canonical scheduled retrain is medallion_train_cycle
+    # (weekly + drift-triggered); this DAG stays for ad-hoc train+register runs.
+    schedule=None,
     catchup=False,
     default_args={
         "owner": "data",

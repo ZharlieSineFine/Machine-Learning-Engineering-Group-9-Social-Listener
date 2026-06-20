@@ -10,9 +10,11 @@ if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 MONITORING_BUCKET = "monitoring"
+RETRAIN_DAG_ID = "medallion_train_cycle"
 
 
 def _minio_client():
@@ -76,8 +78,6 @@ def _record_report(dsn: str, run_date: str, report_url: str, result) -> None:
 
 
 def _task_drift(**context) -> dict:
-    from dataclasses import asdict
-
     from monitoring.drift_checks import run_drift_check
 
     run_date = context["ds"]  # YYYY-MM-DD logical date
@@ -87,12 +87,34 @@ def _task_drift(**context) -> dict:
     report_url = _upload_report(_minio_client(), Path(result.report_path), run_date)
     _record_report(_app_dsn(), run_date, report_url, result)
 
+    blocked = not result.passed_gate
     print(
         f"[evaluate_and_monitor] {run_date}: drift_score={result.drift_score:.3f} "
-        f"passed_gate={result.passed_gate} evidently_ran={result.evidently_ran} "
-        f"-> {report_url}"
+        f"passed_gate={result.passed_gate} blocked={blocked} "
+        f"evidently_ran={result.evidently_ran} -> {report_url}"
     )
-    return {**asdict(result), "report_url": report_url, "run_date": run_date}
+    # Return an XCom-light, JSON-serializable summary (no html bytes).
+    return {
+        "drift_score": result.drift_score,
+        "passed_gate": result.passed_gate,
+        "blocked": blocked,
+        "evidently_ran": result.evidently_ran,
+        "n_reference": result.n_reference,
+        "n_current": result.n_current,
+        "report_url": report_url,
+        "run_date": run_date,
+    }
+
+
+def _should_retrain(**context) -> bool:
+    """ShortCircuit: only let the retrain trigger run when drift blocked the gate."""
+    info = context["ti"].xcom_pull(task_ids="compute_and_log_drift") or {}
+    blocked = bool(info.get("blocked"))
+    print(
+        f"[evaluate_and_monitor] should_retrain={blocked} "
+        f"(drift_score={info.get('drift_score')})"
+    )
+    return blocked
 
 
 with DAG(
@@ -108,7 +130,22 @@ with DAG(
     },
     tags=["monitoring", "phase1"],
 ) as dag:
-    PythonOperator(
+    compute_and_log_drift = PythonOperator(
         task_id="compute_and_log_drift",
         python_callable=_task_drift,
     )
+
+    # Close the loop: when drift blocks the gate, kick off a full retrain cycle.
+    should_retrain = ShortCircuitOperator(
+        task_id="should_retrain",
+        python_callable=_should_retrain,
+    )
+
+    trigger_retrain = TriggerDagRunOperator(
+        task_id="trigger_retrain",
+        trigger_dag_id=RETRAIN_DAG_ID,
+        reset_dag_run=True,        # avoid duplicate run_id clashes on re-fire
+        wait_for_completion=False,
+    )
+
+    compute_and_log_drift >> should_retrain >> trigger_retrain

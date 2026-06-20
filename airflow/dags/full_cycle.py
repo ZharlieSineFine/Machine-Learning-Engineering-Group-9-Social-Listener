@@ -3,7 +3,7 @@
 One DAG that runs the whole loop end to end so a single trigger produces a
 deployable model:
 
-    ingest >> bronze >> silver >> ge_gate >> gold >> train >> promote >> reload_api
+    ingest >> bronze >> silver >> ge_gate >> gold >> train >> gate >> promote >> reload_api
 
 The task bodies are thin wrappers around the same pure functions the per-stage
 DAGs use (``data.run_daily`` / ``data.refine`` / ``models.*``) — nothing is
@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 _REPO_ROOT = Path("/opt/project")
@@ -56,7 +56,6 @@ _BRONZE_ROOT = _REPO_ROOT / "data" / "bronze"
 _SILVER_ROOT = _REPO_ROOT / "data" / "silver" / "reviews"
 _GOLD_ROOT = _REPO_ROOT / "data" / "gold"
 _TRAINING_CSV = _GOLD_ROOT / "_training_frame.csv"
-_MONITORING_BUCKET = "monitoring"
 
 
 def _minio_client():
@@ -81,42 +80,6 @@ def _app_dsn() -> str:
     port = os.environ.get("POSTGRES_PORT", "5432")
     db = os.environ["POSTGRES_DB"]
     return f"postgresql://{user}:{pw}@{host}:{port}/{db}"
-
-
-def _upload_report(client, local_path: Path, run_date: str) -> str:
-    """Upload the HTML report to s3://monitoring/{run_date}/report.html."""
-    key = f"{run_date}/report.html"
-    client.upload_file(
-        Filename=str(local_path),
-        Bucket=_MONITORING_BUCKET,
-        Key=key,
-        ExtraArgs={"ContentType": "text/html"},
-    )
-    return f"s3://{_MONITORING_BUCKET}/{key}"
-
-
-def _record_report(dsn: str, run_date: str, report_url: str, result) -> None:
-    """Insert a pointer row into `monitoring_reports` for the dashboard to read."""
-    import psycopg2
-
-    conn = psycopg2.connect(dsn)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO monitoring_reports "
-                    "(run_date, report_type, report_url, drift_score, blocked_promotion) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (
-                        run_date,
-                        "data_drift",
-                        report_url,
-                        float(result.drift_score),
-                        not result.passed_gate,
-                    ),
-                )
-    finally:
-        conn.close()
 
 
 def _task_ingest(**_context) -> int:
@@ -188,7 +151,88 @@ def _task_train(**_context) -> dict:
     return asdict(result)
 
 
+def _task_gate(**context) -> dict:
+    """Promotion gate: data drift OR performance regression between the training
+    frame (reference) and the recent silver window (current).
+
+    Loads the just-trained model from its pickle, scores it on both sides
+    (macro-F1 + negative-class recall), runs the Evidently data-drift report,
+    uploads the HTML + writes the ``monitoring_reports`` row, and returns
+    ``blocked_promotion`` for ``promote`` to honour. Never raises — promotion is
+    gated by the returned flag, not by failing the task.
+    """
+    import pickle
+
+    import pandas as pd
+    import psycopg2
+
+    from data.refine.build_gold import label_from_rating
+    from monitoring.drift_checks import (
+        DRIFT_RECENT_PARTITIONS,
+        _features_from_reviews,
+        _load_recent_silver,
+        evaluate,
+    )
+
+    train_res = context["ti"].xcom_pull(task_ids="train") or {}
+    artifact_path = train_res.get("artifact_path")
+    if not artifact_path or not Path(artifact_path).exists():
+        print("[full_cycle.gate] no model artifact found; skipping gate (promotion ungated)")
+        return {"blocked_promotion": False, "skipped": True}
+
+    with open(artifact_path, "rb") as fh:
+        model = pickle.load(fh)
+
+    # reference = the training frame (text + label); current = recent silver with
+    # labels derived from rating (silver carries no label of its own).
+    reference = pd.read_csv(_TRAINING_CSV)
+    recent = _load_recent_silver(_SILVER_ROOT, DRIFT_RECENT_PARTITIONS)
+    if recent is None or recent.empty:
+        print("[full_cycle.gate] no recent silver window; gating reference-vs-itself")
+        current = reference.copy()
+    else:
+        current = _features_from_reviews(recent)
+        if "rating" in current.columns:
+            current["label"] = [
+                label_from_rating(r) if pd.notna(r) else None
+                for r in current["rating"]
+            ]
+        current = current.dropna(subset=["label"])
+
+    conn = psycopg2.connect(_app_dsn())
+    try:
+        with conn:  # commit on success
+            result = evaluate(
+                reference,
+                current,
+                conn,
+                _minio_client(),
+                run_date=date.fromisoformat(context["ds"]),
+                model=model,
+                report_type="performance",
+                raise_on_block=False,
+            )
+    finally:
+        conn.close()
+
+    print(
+        f"[full_cycle.gate] blocked_promotion={result['blocked_promotion']} "
+        f"drift_score={result['drift_score']:.3f} f1_drop={result['f1_drop']} "
+        f"recall_neg_drop={result['recall_neg_drop']} -> {result['report_url']}"
+    )
+    return result
+
+
 def _task_promote(**context) -> bool:
+    gate = context["ti"].xcom_pull(task_ids="gate") or {}
+    if gate.get("blocked_promotion"):
+        print(
+            "[full_cycle.promote] gate blocked promotion "
+            f"(drift_score={gate.get('drift_score')}, f1_drop={gate.get('f1_drop')}, "
+            f"recall_neg_drop={gate.get('recall_neg_drop')}); leaving model unstaged"
+        )
+        return False
+
     result = context["ti"].xcom_pull(task_ids="train") or {}
     promoted = promote_to_production(
         version=result.get("mlflow_model_version"),
@@ -228,32 +272,13 @@ def _task_reload_api(**context) -> None:
         print(f"[full_cycle.reload_api] reload failed ({exc}); model still promoted in MLflow")
 
 
-def _task_monitor(**context) -> dict:
-    """Closing Evidently drift report → MinIO + monitoring_reports (same as the
-    standalone evaluate_and_monitor DAG, run here as the cycle's final gate)."""
-    from dataclasses import asdict
-
-    from monitoring.drift_checks import run_drift_check
-
-    run_date = context["ds"]  # YYYY-MM-DD logical date
-    result = run_drift_check()
-
-    report_url = _upload_report(_minio_client(), Path(result.report_path), run_date)
-    _record_report(_app_dsn(), run_date, report_url, result)
-
-    print(
-        f"[full_cycle.monitor] {run_date}: drift_score={result.drift_score:.3f} "
-        f"passed_gate={result.passed_gate} evidently_ran={result.evidently_ran} "
-        f"-> {report_url}"
-    )
-    return {**asdict(result), "report_url": report_url, "run_date": run_date}
-
-
 with DAG(
     dag_id="medallion_train_cycle",
-    description="ingest -> bronze -> silver -> GE -> gold -> train -> promote -> reload API",
+    description="Weekly (or drift-triggered) retrain: ingest -> bronze -> silver -> GE -> gold -> train -> gate -> promote -> reload API",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
+    # Model retrains WEEKLY by cron; evaluate_and_monitor triggers an earlier run
+    # when Evidently flags drift. (Data pipeline runs every 6h in run_daily_medallion.)
+    schedule="0 3 * * 0",  # Sundays 03:00
     catchup=False,
     default_args={
         "owner": "data",
@@ -268,9 +293,9 @@ with DAG(
     ge_gate = PythonOperator(task_id="ge_gate", python_callable=_task_ge_gate)
     gold = PythonOperator(task_id="gold", python_callable=_task_gold)
     train = PythonOperator(task_id="train", python_callable=_task_train)
+    gate = PythonOperator(task_id="gate", python_callable=_task_gate)
     promote = PythonOperator(task_id="promote", python_callable=_task_promote)
     reload_api = PythonOperator(task_id="reload_api", python_callable=_task_reload_api)
-    monitor = PythonOperator(task_id="monitor", python_callable=_task_monitor)
 
     (
         ingest_task
@@ -279,7 +304,7 @@ with DAG(
         >> ge_gate
         >> gold
         >> train
+        >> gate
         >> promote
         >> reload_api
-        >> monitor
     )
