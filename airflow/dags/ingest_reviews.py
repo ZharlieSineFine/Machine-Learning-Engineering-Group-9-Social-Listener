@@ -1,4 +1,4 @@
-"""Airflow DAG — daily ingestion of the review CSV into Postgres.
+"""Airflow DAG — every-6h ingestion of the review CSV into Postgres.
 
 Thin wrapper around `data.ingest.ingest_reviews.ingest`. All real logic
 lives in the pure module so it stays unit-testable without Airflow.
@@ -33,7 +33,7 @@ with DAG(
     dag_id="ingest_reviews",
     description="Load the sample review CSV into Postgres `reviews`",
     start_date=datetime(2025, 1, 1),
-    schedule="@daily",
+    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,
     default_args={
         "owner": "data",

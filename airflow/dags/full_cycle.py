@@ -253,7 +253,7 @@ with DAG(
     dag_id="medallion_train_cycle",
     description="ingest -> bronze -> silver -> GE -> gold -> train -> promote -> reload API",
     start_date=datetime(2025, 1, 1),
-    schedule="@daily",
+    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,
     default_args={
         "owner": "data",

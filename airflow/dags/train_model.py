@@ -1,4 +1,4 @@
-"""Airflow DAG — weekly retrain of the logreg sentiment baseline.
+"""Airflow DAG — every-6h retrain of the logreg sentiment baseline.
 
 Thin wrapper around ``models.train.run``. All real logic (fit, pickle, MLflow
 log + register) lives in the pure module so it stays unit-testable without
@@ -45,9 +45,9 @@ def _task_train(**_context) -> dict:
 
 with DAG(
     dag_id="train_model",
-    description="Weekly retrain of the logreg sentiment baseline + MLflow register",
+    description="Every-6h retrain of the logreg sentiment baseline + MLflow register",
     start_date=datetime(2025, 1, 1),
-    schedule="@weekly",
+    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,
     default_args={
         "owner": "data",

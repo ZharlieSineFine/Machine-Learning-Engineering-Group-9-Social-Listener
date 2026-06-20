@@ -1,4 +1,4 @@
-"""Airflow DAG — daily medallion pipeline (bronze → silver → GE → gold).
+"""Airflow DAG — every-6h medallion pipeline (bronze → silver → GE → gold).
 
 Each layer is its own task so retries are granular, per-layer status/duration
 shows up in the graph, and the GE gate is a visible node (it goes red when
@@ -94,7 +94,7 @@ with DAG(
     dag_id="run_daily_medallion",
     description="Bronze → Silver → GE gate → Gold for Yelp + TripAdvisor",
     start_date=datetime(2025, 1, 1),
-    schedule="@daily",
+    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,
     default_args={
         "owner": "data",
