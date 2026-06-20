@@ -77,3 +77,27 @@ def load_model() -> Optional[LoadedModel]:
         return _load_pickle(DEFAULT_PICKLE)
     print(f"[model_loader] No model available at {DEFAULT_PICKLE} and MLflow not configured")
     return None
+
+def load_staging_model() -> Optional[LoadedModel]:
+    """Load the Staging model from MLflow, if one exists.
+
+    Returns None if MLflow isn't configured or no Staging model exists.
+    Unlike load_model(), this never falls back to pickle — a missing
+    Staging model is normal (not an error).
+    """
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    model_name = os.getenv("MODEL_NAME")
+    if not (tracking_uri and model_name):
+        return None
+
+    import mlflow
+    import mlflow.sklearn
+
+    mlflow.set_tracking_uri(tracking_uri)
+    try:
+        uri = f"models:/{model_name}/Staging"
+        pipe = mlflow.sklearn.load_model(uri)
+        return LoadedModel(pipeline=pipe, source="mlflow-staging")
+    except Exception:
+        # No Staging model promoted yet — this is expected during Phase 2 ramp-up.
+        return None
