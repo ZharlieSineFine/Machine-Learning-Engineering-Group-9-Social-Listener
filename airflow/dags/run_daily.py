@@ -1,7 +1,14 @@
 """Airflow DAG — daily medallion pipeline (bronze → silver → GE → gold).
 
-Thin wrapper around ``data.run_daily.run_daily``. Raw dataset paths come from
-the container env (see docker-compose ``YELP_TAR_PATH`` / ``TRIPADVISOR_CSV_PATH``).
+Each layer is its own task so retries are granular, per-layer status/duration
+shows up in the graph, and the GE gate is a visible node (it goes red when
+validation blocks promotion). The task bodies are thin wrappers around the pure
+functions in ``data.run_daily`` / ``data.refine`` — the building blocks are
+unchanged and still callable via ``python -m data.run_daily`` for CLI and tests.
+
+Affected ``review_date`` keys flow silver → ge_gate → gold over XCom. Raw
+dataset paths come from the container env (see docker-compose
+``YELP_TAR_PATH`` / ``TRIPADVISOR_CSV_PATH``).
 
 Owner: Charlie + Ha.
 """
@@ -18,24 +25,69 @@ if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-from data.run_daily import run_daily
+from data.ingest.ingest_reviews import DEFAULT_SILVER_RECENT_YEARS
+from data.refine.build_gold import process_review_dates
+from data.refine.build_silver import (
+    process_ingestion_to_silver,
+    read_silver_partition,
+    silver_partition_path,
+)
+from data.run_daily import _run_bronze, validate_silver_partitions
+
+_SOURCES = ["yelp", "tripadvisor"]
+_BRONZE_ROOT = _REPO_ROOT / "data" / "bronze"
+_SILVER_ROOT = _REPO_ROOT / "data" / "silver" / "reviews"
+_GOLD_ROOT = _REPO_ROOT / "data" / "gold"
 
 
-def _task_run_daily(**context) -> dict:
+def _task_bronze(**context) -> None:
     run_date = context["ds"]  # YYYY-MM-DD from Airflow logical date
-    summary = run_daily(
-        run_date,
-        ["yelp", "tripadvisor"],
-        bronze_root=_REPO_ROOT / "data" / "bronze",
-        silver_root=_REPO_ROOT / "data" / "silver" / "reviews",
-        gold_root=_REPO_ROOT / "data" / "gold",
+    _run_bronze(run_date, _SOURCES, _BRONZE_ROOT)
+    print(f"[run_daily.bronze] {run_date}: landed {_SOURCES}")
+
+
+def _task_silver(**context) -> list[str]:
+    run_date = context["ds"]
+    affected = process_ingestion_to_silver(
+        _BRONZE_ROOT,
+        _SILVER_ROOT,
+        [run_date],
+        _SOURCES,
+        recent_years=DEFAULT_SILVER_RECENT_YEARS,
     )
+    affected = sorted(affected)
+    print(f"[run_daily.silver] {run_date}: {len(affected)} review_date partition(s)")
+    return affected  # -> XCom
+
+
+def _task_ge_gate(**context) -> list[str]:
+    affected = context["ti"].xcom_pull(task_ids="silver") or []
+    if not affected:
+        print("[run_daily.ge_gate] no affected partitions; skipping validation")
+        return affected
+    validate_silver_partitions(_SILVER_ROOT, affected)  # raises DailyRunError on violation
+    print(f"[run_daily.ge_gate] validated {len(affected)} partition(s)")
+    return affected
+
+
+def _task_gold(**context) -> dict:
+    affected = context["ti"].xcom_pull(task_ids="ge_gate") or []
+    if not affected:
+        print("[run_daily.gold] no affected partitions; skipping gold build")
+        return {"review_dates": [], "total_silver_rows": 0}
+
+    process_review_dates(_SILVER_ROOT, _GOLD_ROOT, affected)
+
+    counts = {
+        key: len(read_silver_partition(silver_partition_path(_SILVER_ROOT, key)))
+        for key in affected
+    }
+    total = sum(counts.values())
     print(
-        f"[run_daily] {summary['run_date']}: "
-        f"{summary['total_silver_rows']} silver rows, "
-        f"{len(summary['review_dates'])} review_date partition(s)"
+        f"[run_daily.gold] {total} silver rows across "
+        f"{len(affected)} review_date partition(s)"
     )
-    return summary
+    return {"review_dates": affected, "silver_row_counts": counts, "total_silver_rows": total}
 
 
 with DAG(
@@ -51,7 +103,9 @@ with DAG(
     },
     tags=["data", "medallion"],
 ) as dag:
-    PythonOperator(
-        task_id="bronze_silver_gold",
-        python_callable=_task_run_daily,
-    )
+    bronze = PythonOperator(task_id="bronze", python_callable=_task_bronze)
+    silver = PythonOperator(task_id="silver", python_callable=_task_silver)
+    ge_gate = PythonOperator(task_id="ge_gate", python_callable=_task_ge_gate)
+    gold = PythonOperator(task_id="gold", python_callable=_task_gold)
+
+    bronze >> silver >> ge_gate >> gold

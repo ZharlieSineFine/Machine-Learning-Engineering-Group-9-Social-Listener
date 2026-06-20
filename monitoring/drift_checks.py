@@ -55,6 +55,18 @@ DEFAULT_SAMPLE_CSV = _first_existing(
     _REPO_ROOT / "data" / "sample" / "reviews_sample.csv",  # local checkout
 )
 
+# Silver root holding ``review_date=YYYY-MM-DD/part.parquet`` partitions, which
+# the medallion DAG produces. Phase 2 ``current`` data is read from the most
+# recent partitions here. Falls back to the train-vs-itself stub if empty.
+DEFAULT_SILVER_ROOT = _first_existing(
+    Path(os.getenv("DRIFT_SILVER_ROOT", "")) if os.getenv("DRIFT_SILVER_ROOT") else None,
+    Path("/opt/project/data/silver/reviews"),  # Airflow container mount
+    _REPO_ROOT / "data" / "silver" / "reviews",  # local checkout
+)
+
+# How many recent review_date partitions form the ``current`` window.
+DRIFT_RECENT_PARTITIONS = int(os.getenv("DRIFT_RECENT_PARTITIONS", "7"))
+
 # Where the HTML report is written. Phase 2 swaps this for MinIO
 # (s3://monitoring/{date}/report.html) per monitoring/README.md.
 DEFAULT_REPORT_DIR = Path(
@@ -101,18 +113,63 @@ def _features_from_reviews(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _load_recent_silver(
+    silver_root: Path, n_partitions: int
+) -> Optional[pd.DataFrame]:
+    """Concat the most recent ``n_partitions`` ``review_date=`` silver partitions.
+
+    Returns None when the silver root has no readable partitions yet (fresh
+    stack), so the caller can degrade to the train-vs-itself stub instead of
+    failing the DAG.
+    """
+    if not silver_root or not silver_root.exists():
+        return None
+
+    # Partition dirs are ``review_date=YYYY-MM-DD``; newest keys sort last.
+    keys = sorted(
+        (p.name.split("=", 1)[1] for p in silver_root.glob("review_date=*") if p.is_dir()),
+        reverse=True,
+    )[:n_partitions]
+    if not keys:
+        return None
+
+    from data.refine.build_silver import read_silver_partition, silver_partition_path
+
+    frames = []
+    for key in keys:
+        df = read_silver_partition(silver_partition_path(silver_root, key))
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
 def _build_reference_and_current(
     sample_csv: Path,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Phase 1: reference == current == the sample CSV (train vs. itself).
+    silver_root: Optional[Path] = None,
+    n_partitions: int = DRIFT_RECENT_PARTITIONS,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    """Reference = sample/training CSV; current = recent silver partitions.
 
-    Phase 2 replaces ``current`` with the last 7 days of ingested reviews
-    pulled from Postgres ``reviews_silver`` / ``reviews_gold``.
+    Returns ``(reference, current, used_silver)``. When no silver partitions
+    exist yet, ``current`` falls back to a copy of ``reference`` (train vs.
+    itself -> guaranteed-pass gate) and ``used_silver`` is False, preserving the
+    "DAG stays green while wiring settles" property.
+
+    Reference and current are reduced to their shared columns so Evidently sees
+    a matching schema (silver has no ``label``, the sample CSV does).
     """
-    df = pd.read_csv(sample_csv)
-    features = _features_from_reviews(df)
-    # Same data on both sides -> guaranteed-pass gate, by design.
-    return features, features.copy()
+    reference = _features_from_reviews(pd.read_csv(sample_csv))
+
+    silver_root = silver_root or DEFAULT_SILVER_ROOT
+    recent = _load_recent_silver(silver_root, n_partitions)
+    if recent is None:
+        return reference, reference.copy(), False
+
+    current = _features_from_reviews(recent)
+    shared = [c for c in reference.columns if c in current.columns]
+    return reference[shared], current[shared], True
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +245,14 @@ def run_drift_check(
     sample_csv: Optional[Path] = None,
     report_dir: Optional[Path] = None,
     threshold: float = DRIFT_THRESHOLD,
+    silver_root: Optional[Path] = None,
 ) -> DriftResult:
-    """Run the Phase 1 drift stub and return a structured result.
+    """Run the drift check and return a structured result.
 
-    Always returns (never raises on Evidently internals) so the Airflow task
-    stays green while the pipeline is still being wired together.
+    ``reference`` is the training/sample distribution; ``current`` is the most
+    recent silver partitions. Falls back to train-vs-itself when no silver data
+    exists yet. Always returns (never raises on Evidently internals) so the
+    Airflow task stays green while the pipeline is still being wired together.
     """
     sample_csv = Path(sample_csv) if sample_csv else DEFAULT_SAMPLE_CSV
     if not sample_csv or not sample_csv.exists():
@@ -205,7 +265,14 @@ def run_drift_check(
     html_path = report_dir / f"{date.today():%Y-%m-%d}" / "report.html"
     html_path.parent.mkdir(parents=True, exist_ok=True)
 
-    reference, current = _build_reference_and_current(sample_csv)
+    reference, current, used_silver = _build_reference_and_current(
+        sample_csv, silver_root
+    )
+    if not used_silver:
+        print(
+            "[drift] no silver partitions found — falling back to train-vs-itself "
+            "stub (gate will pass)"
+        )
     summary = _run_evidently(reference, current, html_path)
 
     if summary is None:
