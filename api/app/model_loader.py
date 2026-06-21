@@ -35,9 +35,9 @@ class LoadedModel:
 def _try_mlflow() -> Optional[LoadedModel]:
     """Pull `models:/<MODEL_NAME>/<MODEL_STAGE>` from the MLflow registry.
 
-    Returns None (caller falls back to pickle) if MLflow isn't configured.
-    Raises if MLflow IS configured but the load fails — we'd rather fail
-    fast than silently serve a stale pickle in production.
+    Returns None (caller falls back to the local pickle) when MLflow isn't
+    configured OR the model isn't in the registry yet (nothing promoted) — so the
+    API still boots for the demo instead of crash-looping on an empty registry.
     """
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     model_name = os.getenv("MODEL_NAME")
@@ -58,7 +58,11 @@ def _try_mlflow() -> Optional[LoadedModel]:
     # When bumping to MLflow >=3, switch to `models:/sentiment-baseline@production`
     # and have the training DAG set the alias instead of transitioning stages.
     uri = f"models:/{model_name}/{stage}"
-    pipe = mlflow.sklearn.load_model(uri)
+    try:
+        pipe = mlflow.sklearn.load_model(uri)
+    except Exception as exc:
+        print(f"[model_loader] MLflow load failed for {uri} ({exc}); falling back to pickle")
+        return None
     return LoadedModel(pipeline=pipe, source="mlflow")
 
 
@@ -77,3 +81,27 @@ def load_model() -> Optional[LoadedModel]:
         return _load_pickle(DEFAULT_PICKLE)
     print(f"[model_loader] No model available at {DEFAULT_PICKLE} and MLflow not configured")
     return None
+
+def load_staging_model() -> Optional[LoadedModel]:
+    """Load the Staging model from MLflow, if one exists.
+
+    Returns None if MLflow isn't configured or no Staging model exists.
+    Unlike load_model(), this never falls back to pickle — a missing
+    Staging model is normal (not an error).
+    """
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    model_name = os.getenv("MODEL_NAME")
+    if not (tracking_uri and model_name):
+        return None
+
+    import mlflow
+    import mlflow.sklearn
+
+    mlflow.set_tracking_uri(tracking_uri)
+    try:
+        uri = f"models:/{model_name}/Staging"
+        pipe = mlflow.sklearn.load_model(uri)
+        return LoadedModel(pipeline=pipe, source="mlflow-staging")
+    except Exception:
+        # No Staging model promoted yet — this is expected during Phase 2 ramp-up.
+        return None

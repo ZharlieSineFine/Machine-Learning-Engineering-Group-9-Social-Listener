@@ -44,3 +44,16 @@ class ReloadResponse(BaseModel):
     status: str
     model_loaded: bool
     model_source: str
+
+class ShadowLogEntry(BaseModel):
+    """One row written to the predictions log per /predict call.
+    
+    TODO (Phase 2): write this to the `predictions` Postgres table
+    (see WORKFLOW.md handoff contracts) once Charlie/Ha's schema lands.
+    For now, logged in-memory via shadow.py.
+    """
+    text: str
+    production_label: str
+    staging_label: str | None  # None if no Staging model is loaded
+    stage: str  # 'production' | 'shadow'
+    

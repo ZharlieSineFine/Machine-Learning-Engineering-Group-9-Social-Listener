@@ -6,3 +6,4 @@ wordcloud>=1.9
 psycopg2-binary>=2.9
 sqlalchemy>=2.0
 mlflow>=2.10,<3
+streamlit-autorefresh>=1.0

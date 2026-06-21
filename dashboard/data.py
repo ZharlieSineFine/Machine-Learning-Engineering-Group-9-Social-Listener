@@ -20,7 +20,7 @@ import pandas as pd
 from datetime import date, timedelta
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SAMPLE_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
+DEFAULT_SAMPLE_CSV = ROOT / "data" / "demo" / "demo_jun2026_stable.csv"
 DEFAULT_GOLD_ROOT = ROOT / "data" / "gold"
 
 # Stopwords for the negative-reviews word cloud. Intentionally tiny — the
@@ -100,7 +100,7 @@ def load_reviews(
                 return pd.read_sql(
                     text(
                         "SELECT text, label, source, ingested_at AS review_date "
-                        "FROM reviews WHERE ingested_at >= NOW() - INTERVAL ':days days' "
+                        "FROM reviews WHERE ingested_at >= NOW() - (INTERVAL '1 day' * :days) "
                         "ORDER BY ingested_at"
                     ),
                     conn,
@@ -161,6 +161,21 @@ def _load_gold_parquet(gold_root: Path, days: int) -> Optional[pd.DataFrame]:
     df = feat.merge(lab[["review_id", "label"]], on="review_id", how="inner")
     df["review_date"] = pd.to_datetime(df["review_date"], errors="coerce")
     return df
+
+# ---------- latest batch ----------
+
+def latest_batch(df: pd.DataFrame, time_col: str = "review_date") -> pd.DataFrame:
+    """Rows from the most recent ingested day — the "last batch" the KPI tiles and the
+    spike alert summarise (vs. the multi-day trend the timeline shows). Falls back to
+    the whole frame when there's no usable timestamp."""
+    if df.empty or time_col not in df.columns:
+        return df
+    ts = pd.to_datetime(df[time_col], errors="coerce")
+    if ts.notna().sum() == 0:
+        return df
+    last_day = ts.max().normalize()
+    return df[ts.dt.normalize() == last_day]
+
 
 # ---------- timeline ----------
 

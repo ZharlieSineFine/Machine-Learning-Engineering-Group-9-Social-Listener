@@ -53,7 +53,10 @@ DEFAULT_SCENARIO = "spike"
 SOURCE_COLUMNS = ["text", "label", "review_date"]  # required in every demo CSV
 REPLAY_COLUMNS = ["review_id", "review_date", "text", "label", "source", "scenario", "brand"]
 
-DEFAULT_DEMO_DIR = WORKSPACE_ROOT / "demo_data"
+# Prefer an in-repo copy (tracked, available in containers); fall back to the
+# external workspace demo_data/ for local runs.
+_IN_REPO_DEMO_DIR = ROOT / "data" / "demo"
+DEFAULT_DEMO_DIR = _IN_REPO_DEMO_DIR if _IN_REPO_DEMO_DIR.exists() else WORKSPACE_ROOT / "demo_data"
 DEFAULT_OUT_ROOT = ROOT / "data" / "replay"
 _MAX_SLEEP_SECONDS = 5.0  # cap per-step pacing sleep so a long gap can't stall the run
 
