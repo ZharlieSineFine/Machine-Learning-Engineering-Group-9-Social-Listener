@@ -1,10 +1,23 @@
-"""Airflow DAG — every-6h Evidently drift monitor + closed-loop retrain trigger.
+"""Airflow DAG — pure-observation drift monitor (every 6h).
+
+A read-only **observer** that sits next to ``medallion_pipeline``: it compares the
+recent review window against the reference, writes an Evidently report + a
+``monitoring_reports`` pointer row (which the dashboard reads), and — when drift
+blocks the gate — fires ``send_alert``. That's it. There is **no**
+``TriggerDagRunOperator`` and no side effect on the data or the model: drift
+alerts a human, who decides whether to kick an off-cycle retrain
+(``medallion_pipeline`` with ``FORCE_TRAIN=1``).
+
+Kept separate from the build pipeline on purpose:
+  * **Failure isolation** — an Evidently hiccup here goes red as a *monitoring*
+    failure, not as a "data pipeline failed" page.
+  * **Pure observation** — read-only, its own 6h cadence, no dependency on the
+    producing DAG having just run.
 
 Default source is the observational silver window (``run_drift_check``). Set
 ``DRIFT_REPLAY_SCENARIO=spike`` (with optional ``DRIFT_REPLAY_ASOF`` /
-``DRIFT_REPLAY_N_RECENT``) to drive the gate from the replay simulator's output —
-the demo path where the negative-review spike trips the gate and fires the
-``medallion_train_cycle`` retrain via ``TriggerDagRunOperator``.
+``DRIFT_REPLAY_N_RECENT``) to drive the gate from the replay simulator — the demo
+path where the negative-review spike trips the gate.
 
 Owner: Charlie + Ha (Monitoring).
 """
@@ -15,16 +28,15 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# /opt/project is the in-container mount of the repo root (see docker-compose).
 _REPO_ROOT = Path("/opt/project")
 if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 MONITORING_BUCKET = "monitoring"
-RETRAIN_DAG_ID = "medallion_train_cycle"
 
 
 def _minio_client():
@@ -84,12 +96,12 @@ def _record_report(
 
 
 def _task_drift(**context) -> dict:
-    """Run the drift check, persist the report, return a JSON-light summary.
+    """Run the Evidently drift check, persist the report + a monitoring_reports row.
 
-    Default source is the observational silver window. Set
-    ``DRIFT_REPLAY_SCENARIO`` (stable|spike) to drive the gate from the replay
-    simulator instead — the demo path where the spike trips the gate. Optional
-    ``DRIFT_REPLAY_ASOF`` / ``DRIFT_REPLAY_N_RECENT`` select the current window.
+    Default source is the observational silver window. Set ``DRIFT_REPLAY_SCENARIO``
+    (stable|spike) to drive the gate from the replay simulator instead — the demo
+    path where the spike trips the gate. Optional ``DRIFT_REPLAY_ASOF`` /
+    ``DRIFT_REPLAY_N_RECENT`` select the current window.
     """
     run_date = context["ds"]  # YYYY-MM-DD logical date
 
@@ -123,10 +135,8 @@ def _task_drift(**context) -> dict:
         f"[evaluate_and_monitor] {run_date} ({source}): drift_score={drift_score:.3f} "
         f"blocked={blocked} evidently_ran={evidently_ran} -> {report_url}"
     )
-    # Return an XCom-light, JSON-serializable summary (no html bytes).
     return {
         "drift_score": drift_score,
-        "passed_gate": not blocked,
         "blocked": blocked,
         "evidently_ran": evidently_ran,
         "n_reference": n_ref,
@@ -137,39 +147,37 @@ def _task_drift(**context) -> dict:
     }
 
 
-def _should_retrain(**context) -> bool:
-    """ShortCircuit: only let the retrain trigger run when drift blocked the gate."""
-    info = context["ti"].xcom_pull(task_ids="compute_and_log_drift") or {}
+def _should_alert(**context) -> bool:
+    """ShortCircuit: only fire the alert when drift actually blocked the gate."""
+    info = context["ti"].xcom_pull(task_ids="drift_check") or {}
     blocked = bool(info.get("blocked"))
     print(
-        f"[evaluate_and_monitor] should_retrain={blocked} "
+        f"[evaluate_and_monitor] should_alert={blocked} "
         f"(drift_score={info.get('drift_score')})"
     )
     return blocked
 
 
-def _task_mark_retrained(**context) -> None:
-    """Flag the just-written monitoring_reports row as having triggered a retrain.
+def _task_send_alert(**context) -> None:
+    """Surface the drift alert.
 
-    Reuses monitoring.retrain_trigger.mark_triggered_retrain (the same helper as the
-    standalone CLI path), which self-heals the schema (ADD COLUMN IF NOT EXISTS) for
-    DBs whose volume predates the ``triggered_retrain`` column in init.sql.
+    The ``monitoring_reports`` row written by ``drift_check`` is the durable signal
+    the dashboard renders; this task makes the alert loud in the Airflow logs so a
+    human notices and can decide whether to trigger an off-cycle retrain
+    (``medallion_pipeline`` with ``FORCE_TRAIN=1``). No automatic retrain fires.
     """
-    import psycopg2
-
-    from monitoring.retrain_trigger import mark_triggered_retrain
-
-    conn = psycopg2.connect(_app_dsn())
-    try:
-        ok = mark_triggered_retrain(conn)  # marks the most recent monitoring_reports row
-        print(f"[evaluate_and_monitor] marked triggered_retrain={ok}")
-    finally:
-        conn.close()
+    info = context["ti"].xcom_pull(task_ids="drift_check") or {}
+    print(
+        "[evaluate_and_monitor.ALERT] *** DATA DRIFT DETECTED *** "
+        f"run_date={info.get('run_date')} drift_score={info.get('drift_score')} "
+        f"report={info.get('report_url')} — review on the dashboard; retrain "
+        "off-cycle with FORCE_TRAIN=1 on medallion_pipeline if warranted."
+    )
 
 
 with DAG(
     dag_id="evaluate_and_monitor",
-    description="Every-6h Evidently drift report → MinIO + monitoring_reports",
+    description="Pure-observation Evidently drift monitor → monitoring_reports + alert (no retrain)",
     start_date=datetime(2025, 1, 1),
     schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,
@@ -178,30 +186,19 @@ with DAG(
         "retries": 1,
         "retry_delay": timedelta(minutes=10),
     },
-    tags=["monitoring", "phase1"],
+    tags=["monitoring", "observation"],
 ) as dag:
-    compute_and_log_drift = PythonOperator(
-        task_id="compute_and_log_drift",
+    drift_check = PythonOperator(
+        task_id="drift_check",
         python_callable=_task_drift,
     )
-
-    # Close the loop: when drift blocks the gate, kick off a full retrain cycle.
-    should_retrain = ShortCircuitOperator(
-        task_id="should_retrain",
-        python_callable=_should_retrain,
+    should_alert = ShortCircuitOperator(
+        task_id="should_alert",
+        python_callable=_should_alert,
+    )
+    send_alert = PythonOperator(
+        task_id="send_alert",
+        python_callable=_task_send_alert,
     )
 
-    trigger_retrain = TriggerDagRunOperator(
-        task_id="trigger_retrain",
-        trigger_dag_id=RETRAIN_DAG_ID,
-        reset_dag_run=True,        # avoid duplicate run_id clashes on re-fire
-        wait_for_completion=False,
-    )
-
-    # Record that this drift run fired a retrain (task 2's monitoring_reports flag).
-    mark_retrained = PythonOperator(
-        task_id="mark_retrained",
-        python_callable=_task_mark_retrained,
-    )
-
-    compute_and_log_drift >> should_retrain >> trigger_retrain >> mark_retrained
+    drift_check >> should_alert >> send_alert

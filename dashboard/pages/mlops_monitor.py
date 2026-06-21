@@ -10,7 +10,8 @@ routing picks it up automatically.
 Data sources:
     - MLflow registry/runs  → scripts/compare_mlflow_models.py helpers
     - Shadow log            → GET /shadow/log  (api/app/shadow.py)
-    - Drift check           → monitoring/drift_checks.run_drift_check()
+    - Drift signal          → monitoring_reports table (written by evaluate_and_monitor),
+                              live monitoring/drift_checks.run_drift_check() fallback
     - Pipeline stats        → TODO: Airflow XCom / summary JSON from Charlie/Ha
     - Correction queue      → TODO: predictions table from Charlie/Ha
 
@@ -242,13 +243,66 @@ def _fetch_shadow_log() -> list[dict]:
     return []
 
 
-@st.cache_data(ttl=120)
+def _pg_dsn() -> Optional[str]:
+    """Postgres DSN from the same env the stack injects (None when unconfigured)."""
+    user = os.getenv("POSTGRES_USER")
+    pw   = os.getenv("POSTGRES_PASSWORD")
+    host = os.getenv("POSTGRES_HOST")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db   = os.getenv("POSTGRES_DB")
+    if all([user, pw, host, db]):
+        return f"postgresql://{user}:{pw}@{host}:{port}/{db}"
+    return None
+
+
+def _recorded_drift(dsn: str) -> Optional[dict]:
+    """Latest row the monitor wrote to ``monitoring_reports`` (None if empty)."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT drift_score, blocked_promotion, run_date, report_url "
+                "FROM monitoring_reports ORDER BY created_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "mode": "recorded",
+        "drift_score": float(row[0]) if row[0] is not None else 0.0,
+        "passed_gate": not row[1],
+        "run_date": str(row[2]),
+        "report_url": row[3],
+    }
+
+
+@st.cache_data(ttl=30)   # short TTL so the spike alert shows within seconds during the demo
 def _fetch_drift() -> Optional[dict]:
-    """Run the drift check (Phase 1 stub — train vs itself, always passes)."""
+    """Drift signal for the panel.
+
+    Source of truth is the latest ``monitoring_reports`` row the ``evaluate_and_monitor``
+    DAG wrote — so the dashboard reflects what actually fired the alert (including the
+    demo spike), not a recomputed value. Falls back to a live Evidently check only when
+    no monitor run has landed yet (fresh DB).
+    """
+    dsn = _pg_dsn()
+    if dsn:
+        try:
+            rep = _recorded_drift(dsn)
+            if rep:
+                return rep
+        except Exception as exc:
+            print(f"[mlops_monitor] monitoring_reports read failed ({exc}); live fallback")
+
     try:
         from monitoring.drift_checks import run_drift_check
         result = run_drift_check()
         return {
+            "mode": "live",
             "drift_score":       result.drift_score,
             "n_drifted_columns": result.n_drifted_columns,
             "dataset_drift":     result.dataset_drift,
@@ -532,23 +586,40 @@ def render_drift_panel() -> None:
 
     drift_score = result["drift_score"]
     gate_ok     = result["passed_gate"]
-    evidently   = result["evidently_ran"]
+    mode        = result.get("mode", "live")
 
-    # Gate status badge
+    # Gate status badge. "Blocked" matches the promotion-gate / alert semantics:
+    # a blocked gate is exactly what evaluate_and_monitor alerts on.
     gate_color  = TEAL if gate_ok else RED
     gate_bg     = "#0D2E21" if gate_ok else "#2E1111"
-    gate_label  = "Gate passed" if gate_ok else "Gate failed"
+    gate_label  = "Gate passed" if gate_ok else "Gate blocked"
     gate_badge  = _badge(gate_label, gate_color, gate_bg)
-
-    stub_note = (
-        f'<p style="margin:6px 0 0;font-size:11px;color:{AMBER};">'
-        f'⚠ Phase 1 stub — running train-vs-itself (always passes). '
-        f'Real reference dataset lands in Phase 2 (Charlie/Ha).</p>'
-        if not evidently else ""
-    )
 
     score_bar_pct = min(drift_score * 100 / 0.5, 100)   # 0.5 = visual max
     bar_color = TEAL if drift_score < 0.15 else (AMBER if drift_score < DRIFT_THRESHOLD else RED)
+
+    # Provenance line: a recorded monitor run vs the live Evidently fallback.
+    if mode == "recorded":
+        meta = (
+            f'<p style="margin:8px 0 0;font-size:11px;color:{TEXT_SEC};">'
+            f'📥 Recorded by <code>evaluate_and_monitor</code> · run '
+            f'<span style="color:{TEXT_PRI};">{result.get("run_date", "?")}</span>'
+            f'&nbsp;·&nbsp; report <span style="color:{TEXT_PRI};">'
+            f'{result.get("report_url", "—")}</span></p>'
+        )
+    else:
+        evidently = result.get("evidently_ran")
+        meta = (
+            f'<p style="margin:8px 0 0;font-size:12px;color:{TEXT_SEC};">'
+            f'Columns drifted: <span style="color:{TEXT_PRI};">{result.get("n_drifted_columns", "?")}</span>'
+            f'&nbsp;·&nbsp; Reference rows: <span style="color:{TEXT_PRI};">{result.get("n_reference", "?")}</span></p>'
+        )
+        meta += (
+            f'<p style="margin:6px 0 0;font-size:11px;color:{AMBER};">'
+            f'⚠ Live fallback — no recorded monitor run yet'
+            + ('; Evidently stub (train-vs-itself, always passes).' if not evidently else '.')
+            + '</p>'
+        )
 
     html = f"""
     {inner}
@@ -571,15 +642,7 @@ def render_drift_panel() -> None:
         </div>
         <div>{gate_badge}</div>
     </div>
-    <p style="margin:0;font-size:12px;color:{TEXT_SEC};">
-        Columns drifted: <span style="color:{TEXT_PRI};">{result['n_drifted_columns']}</span>
-        &nbsp;·&nbsp; Reference rows: <span style="color:{TEXT_PRI};">{result['n_reference']}</span>
-    </p>
-    {stub_note}
-    <p style="margin:8px 0 0;font-size:11px;color:{TEXT_SEC};">
-        TODO (Phase 2 · Charlie/Ha): per-column breakdown — text length dist.,
-        avg token count, pred. distribution, confidence dist.
-    </p>
+    {meta}
     """
     _card(html)
 

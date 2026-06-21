@@ -109,7 +109,7 @@ Phase 1 (MVP skeleton)  ──►  Phase 2 (depth)  ──►  Phase 3 (polish +
 - Full Great Expectations suite (length bounds, language detect, duplicate rate, label cardinality)
 - Evidently report uploaded to MinIO per DAG run; row written to `monitoring_reports`
 - **Model validation gate**: DAG fails (and blocks promotion) if F1 drops > 3% or drift score > τ
-- **Retrain trigger**: `monitoring/retrain_trigger.py` calls Airflow REST API to kick off `train_model` when drift > τ; writes `triggered_retrain=true` to the report row
+- **Drift alert (human-in-the-loop)**: `evaluate_and_monitor` is a read-only observer — on drift > τ it writes the `monitoring_reports` row and fires `send_alert`. No auto-retrain; a human retrains off-cycle by triggering `medallion_pipeline` with `FORCE_TRAIN=1` if warranted
 
 **Anh (Glue)**
 - CI matrix: lint, unit, integration (boots compose, hits `/predict`)
