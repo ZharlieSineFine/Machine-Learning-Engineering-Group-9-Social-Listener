@@ -99,6 +99,15 @@ DEFAULT_RECALL_NEG_DROP_THRESHOLD = float(
 )
 DEFAULT_BUCKET = "monitoring"
 
+# Statistical test Evidently uses per column. PSI (Population Stability Index)
+# is the industry-standard distribution-shift metric: it bins each column and
+# sums (cur% - ref%) * ln(cur% / ref%) across bins. Standard bands are
+# < 0.1 no shift, 0.1-0.2 moderate, > 0.2 significant — so a column "drifts"
+# when its PSI clears DRIFT_PSI_THRESHOLD. Applied to data features, the target
+# label, AND the prediction column, so all three drift types share one boundary.
+DRIFT_STATTEST = os.getenv("DRIFT_STATTEST", "psi")
+DRIFT_PSI_THRESHOLD = float(os.getenv("DRIFT_PSI_THRESHOLD", "0.2"))
+
 # Back-compat alias for the env-driven observational threshold.
 DRIFT_THRESHOLD = DEFAULT_DRIFT_THRESHOLD
 
@@ -125,6 +134,7 @@ class DriftResult:
     html: bytes = b""
     drift_score: float = 0.0            # share of drifted columns (0.0 .. 1.0)
     drifted_columns: list = field(default_factory=list)
+    psi_by_column: dict = field(default_factory=dict)  # {column: PSI statistic}
     n_reference: int = 0
     n_current: int = 0
     report_path: Optional[str] = None
@@ -170,24 +180,25 @@ def compute_model_recall_neg(model, df: pd.DataFrame) -> float:
     )
 
 
-def _score_model(model, df: pd.DataFrame) -> tuple[float, float]:
-    """Return ``(f1_macro, recall_neg)`` from a SINGLE prediction pass.
+def _metrics_from_predictions(df: pd.DataFrame) -> tuple[float, float]:
+    """Return ``(f1_macro, recall_neg)`` from a frame carrying ``label`` +
+    ``prediction`` columns — i.e. predictions already scored by the caller.
 
-    ``evaluate`` must score each side with exactly one ``predict`` call:
-    callers sometimes pass stateful models whose behaviour changes after the
-    first call. Computing F1 and recall via two separate calls would corrupt
-    the comparison.
+    ``evaluate`` scores each side with exactly ONE ``predict`` call and reuses
+    those predictions for both the performance metrics here AND the
+    prediction-drift column. Re-predicting would corrupt stateful models whose
+    behaviour changes after the first call.
     """
     from sklearn.metrics import f1_score, recall_score
 
-    df = df.dropna(subset=["text", "label"])
+    df = df.dropna(subset=["label", "prediction"])
     if len(df) == 0:
         return 0.0, 0.0
-    preds = model.predict(df["text"].astype(str).tolist())
-    f1 = float(f1_score(df["label"], preds, average="macro", zero_division=0))
+    f1 = float(f1_score(df["label"], df["prediction"], average="macro", zero_division=0))
     recall_neg = float(
         recall_score(
-            df["label"], preds, labels=[NEG_LABEL], average="macro", zero_division=0
+            df["label"], df["prediction"], labels=[NEG_LABEL], average="macro",
+            zero_division=0,
         )
     )
     return f1, recall_neg
@@ -228,9 +239,11 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
     ref = reference_df[monitored]
     cur = current_df[monitored]
 
-    metrics = [DataDriftPreset()]
+    metrics = [DataDriftPreset(stattest=DRIFT_STATTEST, stattest_threshold=DRIFT_PSI_THRESHOLD)]
     if TARGET_COL in monitored:
-        metrics.append(TargetDriftPreset())
+        metrics.append(
+            TargetDriftPreset(stattest=DRIFT_STATTEST, stattest_threshold=DRIFT_PSI_THRESHOLD)
+        )
 
     report = Report(metrics=metrics)
     report.run(
@@ -242,6 +255,7 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
     payload = report.as_dict()
     drift_score = 0.0
     drifted_columns: list = []
+    psi_by_column: dict = {}
     n_drifted = 0
     dataset_drift = False
     for m in payload.get("metrics", []):
@@ -253,6 +267,12 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
         if m.get("metric") == "DataDriftTable":
             cols = m.get("result", {}).get("drift_by_columns", {})
             drifted_columns = [c for c, v in cols.items() if v.get("drift_detected")]
+            # With stattest="psi", each column's drift_score IS its PSI statistic.
+            psi_by_column = {
+                c: float(v["drift_score"])
+                for c, v in cols.items()
+                if v.get("drift_score") is not None
+            }
 
     # Evidently's save_html wants a filesystem path — round-trip via a temp file.
     import tempfile
@@ -272,6 +292,7 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
         html=html,
         drift_score=drift_score,
         drifted_columns=drifted_columns,
+        psi_by_column=psi_by_column,
         n_reference=len(ref),
         n_current=len(cur),
         n_drifted_columns=n_drifted,
@@ -343,23 +364,42 @@ def evaluate(
     ``model`` is given) macro-F1 drops past ``f1_drop_threshold`` OR negative-class
     recall drops past ``recall_neg_drop_threshold``.
 
+    The uploaded report ALSO covers target + prediction-distribution drift (PSI),
+    so the gate report aligns with the observational monitor — but prediction
+    drift is informational here and does NOT change the promote/block decision
+    (that stays data drift + measured performance).
+
     Order of operations: upload + insert FIRST, then raise — so the failing report
     is still discoverable in the dashboard. ``raise_on_block=True`` raises
     ``PromotionBlocked`` on a block (used by the DAG so the task fails red);
     default ``False`` lets callers inspect the returned dict.
     """
     run_date = run_date or date.today()
-    drift = compute_drift(reference_df, current_df)
 
+    # Score the model ONCE per side (reference then current); reuse those
+    # predictions for both the performance metrics and the prediction-drift
+    # column, so stateful models still see exactly one predict() call per side.
+    ref = reference_df.copy()
+    cur = current_df.copy()
     reference_f1 = current_f1 = f1_drop = None
     reference_recall_neg = current_recall_neg = recall_neg_drop = None
     if model is not None:
-        reference_f1, reference_recall_neg = _score_model(model, reference_df)
-        current_f1, current_recall_neg = _score_model(model, current_df)
-        f1_drop = reference_f1 - current_f1
-        recall_neg_drop = reference_recall_neg - current_recall_neg
+        if "text" in ref.columns:
+            ref["prediction"] = model.predict(ref["text"].astype(str).tolist())
+            reference_f1, reference_recall_neg = _metrics_from_predictions(ref)
+        if "text" in cur.columns:
+            cur["prediction"] = model.predict(cur["text"].astype(str).tolist())
+            current_f1, current_recall_neg = _metrics_from_predictions(cur)
+        if reference_f1 is not None and current_f1 is not None:
+            f1_drop = reference_f1 - current_f1
+            recall_neg_drop = reference_recall_neg - current_recall_neg
 
-    drift_blocks = drift.is_blocking(drift_threshold)
+    # model=None: predictions are already attached above (or absent), so the
+    # report reuses them and never re-scores.
+    rpt = compute_drift_report(ref, cur, model=None)
+    data_drift_score = rpt["data_drift_score"]
+
+    drift_blocks = data_drift_score >= drift_threshold
     f1_blocks = (f1_drop is not None) and (f1_drop > f1_drop_threshold)
     recall_neg_blocks = (
         recall_neg_drop is not None
@@ -367,18 +407,23 @@ def evaluate(
     blocked = drift_blocks or f1_blocks or recall_neg_blocks
 
     s3_url = upload_html_to_minio(
-        minio_client, drift.html, run_date, report_type, bucket=bucket
+        minio_client, rpt["html"], run_date, report_type, bucket=bucket
     )
     row_id = insert_pointer_row(
-        conn, run_date, report_type, s3_url, drift.drift_score, blocked
+        conn, run_date, report_type, s3_url, data_drift_score, blocked
     )
 
     result = {
         "report_id": row_id,
         "s3_url": s3_url,
         "report_url": s3_url,
-        "drift_score": drift.drift_score,
-        "drifted_columns": drift.drifted_columns,
+        "drift_score": data_drift_score,
+        "drifted_columns": rpt["drifted_columns"],
+        "psi_by_column": rpt["psi_by_column"],
+        "target_drift_score": rpt["target_drift_score"],
+        "target_drift": rpt["target_drift"],
+        "prediction_drift_score": rpt["prediction_drift_score"],
+        "prediction_drift": rpt["prediction_drift"],
         "reference_f1": reference_f1,
         "current_f1": current_f1,
         "f1_drop": f1_drop,
@@ -395,7 +440,7 @@ def evaluate(
         reasons = []
         if drift_blocks:
             reasons.append(
-                f"drift_score={drift.drift_score:.3f} >= {drift_threshold:.3f}"
+                f"drift_score={data_drift_score:.3f} >= {drift_threshold:.3f}"
             )
         if f1_blocks:
             reasons.append(
@@ -567,6 +612,7 @@ class MonitorResult:
     report_path: str
     data_drift_score: float = 0.0
     dataset_drift: bool = False
+    psi_by_column: dict = field(default_factory=dict)
     target_drift_score: Optional[float] = None
     target_drift: bool = False
     prediction_drift_score: Optional[float] = None
@@ -596,20 +642,49 @@ def compute_drift_report(
     """
     from evidently import ColumnMapping
     from evidently.metric_preset import DataDriftPreset, TargetDriftPreset
+    from evidently.metrics import ColumnDriftMetric
     from evidently.report import Report
 
     ref = reference_df.copy()
     cur = current_df.copy()
 
-    # Score the model once per side to get a `prediction` column for drift.
+    # Establish a `prediction` column on both frames for prediction-distribution
+    # drift. The current frame may ALREADY carry one (the predictions-table path
+    # supplies real logged predictions) — in that case we keep it and only score
+    # the reference to get the expected distribution. Otherwise we score the model
+    # on both sides (the silver-window fallback). Either way it's one predict call
+    # per side, so stateful models compare correctly.
+    ref_has_pred = "prediction" in ref.columns and ref["prediction"].notna().any()
+    cur_has_pred = "prediction" in cur.columns and cur["prediction"].notna().any()
     has_pred = False
     if model is not None and "text" in ref.columns and "text" in cur.columns:
+        # Silver fallback: score the model on both sides (one predict call each).
         try:
-            ref["prediction"] = model.predict(ref["text"].astype(str).tolist())
-            cur["prediction"] = model.predict(cur["text"].astype(str).tolist())
+            if not ref_has_pred:
+                ref["prediction"] = model.predict(ref["text"].astype(str).tolist())
+            if not cur_has_pred:
+                cur["prediction"] = model.predict(cur["text"].astype(str).tolist())
             has_pred = True
         except Exception as exc:  # scoring is best-effort; degrade to no pred drift
             print(f"[drift] prediction scoring failed, skipping prediction drift: {exc}")
+    elif model is not None and "text" in ref.columns and cur_has_pred:
+        # Table path: current carries logged predictions; only score the reference.
+        try:
+            if not ref_has_pred:
+                ref["prediction"] = model.predict(ref["text"].astype(str).tolist())
+            has_pred = True
+        except Exception as exc:
+            print(f"[drift] reference scoring failed, skipping prediction drift: {exc}")
+    elif ref_has_pred and cur_has_pred:
+        # Both frames already carry predictions — no model needed.
+        has_pred = True
+
+    # Prediction drift needs the column on BOTH sides; drop a lone one to avoid a
+    # mismatched schema in the Evidently report.
+    if not has_pred:
+        for frame in (ref, cur):
+            if "prediction" in frame.columns:
+                frame.drop(columns=["prediction"], inplace=True)
 
     shared = set(ref.columns) & set(cur.columns)
     has_target = TARGET_COL in shared
@@ -623,9 +698,22 @@ def compute_drift_report(
         categorical_features=cat,
     )
 
-    metrics = [DataDriftPreset()]
+    metrics = [DataDriftPreset(stattest=DRIFT_STATTEST, stattest_threshold=DRIFT_PSI_THRESHOLD)]
     if has_target:
-        metrics.append(TargetDriftPreset())  # covers target AND prediction columns
+        # covers target AND prediction columns
+        metrics.append(
+            TargetDriftPreset(stattest=DRIFT_STATTEST, stattest_threshold=DRIFT_PSI_THRESHOLD)
+        )
+    elif has_pred:
+        # No target to anchor TargetDriftPreset, but we still want prediction
+        # drift — add an explicit per-column check on the prediction distribution.
+        metrics.append(
+            ColumnDriftMetric(
+                column_name="prediction",
+                stattest=DRIFT_STATTEST,
+                stattest_threshold=DRIFT_PSI_THRESHOLD,
+            )
+        )
 
     keep = (
         num
@@ -645,6 +733,7 @@ def compute_drift_report(
         "data_drift_score": 0.0,
         "dataset_drift": False,
         "drifted_columns": [],
+        "psi_by_column": {},
         "target_drift_score": None,
         "target_drift": False,
         "prediction_drift_score": None,
@@ -662,6 +751,12 @@ def compute_drift_report(
             out["drifted_columns"] = [
                 c for c, v in cols.items() if v.get("drift_detected")
             ]
+            # With stattest="psi", each column's drift_score IS its PSI statistic.
+            out["psi_by_column"] = {
+                c: float(v["drift_score"])
+                for c, v in cols.items()
+                if v.get("drift_score") is not None
+            }
         elif name == "ColumnDriftMetric":
             col = res.get("column_name")
             score = res.get("drift_score")
@@ -689,6 +784,83 @@ def compute_drift_report(
             pass
 
     return out
+
+
+# How many days of logged predictions form the ``current`` window when the
+# predictions table is the source.
+DRIFT_PRED_WINDOW_DAYS = int(os.getenv("DRIFT_PRED_WINDOW_DAYS", "7"))
+
+
+def _load_recent_predictions(
+    dsn: str, window_days: int = DRIFT_PRED_WINDOW_DAYS
+) -> Optional[pd.DataFrame]:
+    """Load logged predictions from the last ``window_days``, joined to reviews.
+
+    Returns a raw reviews-like frame (``text``, ``predicted_label``, and
+    ``rating`` / ``source`` recovered via ``review_id`` when present) or ``None``
+    when the table is empty / unreachable — the caller then falls back to scoring
+    the model on the silver window. Best-effort: any DB error degrades to None so
+    the every-6h DAG stays green.
+    """
+    try:
+        import psycopg2
+    except Exception as exc:  # driver missing in some test envs
+        print(f"[drift] psycopg2 unavailable, skipping predictions table: {exc}")
+        return None
+
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as exc:
+        print(f"[drift] could not connect for predictions lookup: {exc}")
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.text, p.predicted_label, r.rating, r.source "
+                "FROM predictions p "
+                "LEFT JOIN reviews r ON p.review_id = r.id "
+                "WHERE p.predicted_at >= NOW() - (%s || ' days')::interval",
+                (window_days,),
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        print(f"[drift] predictions lookup failed: {exc}")
+        return None
+    finally:
+        conn.close()
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows, columns=["text", "predicted_label", "rating", "source"])
+
+
+def _current_from_predictions(dsn: str) -> Optional[pd.DataFrame]:
+    """Build the monitored ``current`` frame from the predictions table.
+
+    Carries a real ``prediction`` column (logged predicted labels) plus
+    rating-derived ``label`` and the usual data-drift features. Returns ``None``
+    when no recent predictions exist.
+    """
+    raw = _load_recent_predictions(dsn)
+    if raw is None or raw.empty:
+        return None
+
+    current = _features_from_reviews(raw)
+    current["prediction"] = raw["predicted_label"].astype(str).values
+    if "rating" in current.columns:
+        from data.refine.build_gold import label_from_rating
+
+        current["label"] = [
+            label_from_rating(r) if pd.notna(r) else None for r in current["rating"]
+        ]
+        # Keep label only when ratings actually resolved it; rows without a rating
+        # (unjoined review_id) can't contribute target drift. If none resolved,
+        # drop the column entirely so prediction drift still runs on its own.
+        if current["label"].notna().any():
+            current = current.dropna(subset=["label"])
+        else:
+            current = current.drop(columns=["label"])
+    return current
 
 
 def _build_monitor_frames(
@@ -726,9 +898,15 @@ def run_monitor_drift(
     threshold: float = DEFAULT_DRIFT_THRESHOLD,
     silver_root: Optional[Path] = None,
     model=None,
+    dsn: Optional[str] = None,
 ) -> MonitorResult:
-    """Observational monitor: data + target + prediction drift over the recent
-    silver window. Writes the HTML report to disk and returns a ``MonitorResult``.
+    """Observational monitor: data + target + prediction drift. Writes the HTML
+    report to disk and returns a ``MonitorResult``.
+
+    ``current`` source (both/fallback): when ``dsn`` is given and the predictions
+    table has recent rows, those logged predictions are the current window;
+    otherwise it falls back to the recent silver window, scoring ``model`` to get
+    the prediction distribution.
 
     ``blocked`` is True when data drift crosses ``threshold`` OR target/prediction
     drift is detected — the monitor DAG uses it to fire a retrain. Never raises on
@@ -744,9 +922,15 @@ def run_monitor_drift(
     html_path = report_dir / f"{date.today():%Y-%m-%d}" / "report.html"
     html_path.parent.mkdir(parents=True, exist_ok=True)
 
-    reference, current, used_silver = _build_monitor_frames(sample_csv, silver_root)
-    if not used_silver:
-        print("[drift] no silver partitions — monitoring reference vs itself (no drift)")
+    # Prefer logged predictions when available; otherwise the silver window.
+    reference = _features_from_reviews(pd.read_csv(sample_csv))
+    current = _current_from_predictions(dsn) if dsn else None
+    if current is not None:
+        print(f"[drift] current window = {len(current)} logged predictions")
+    else:
+        reference, current, used_silver = _build_monitor_frames(sample_csv, silver_root)
+        if not used_silver:
+            print("[drift] no silver partitions — monitoring reference vs itself (no drift)")
 
     try:
         rpt = compute_drift_report(reference, current, model=model)
@@ -760,6 +944,7 @@ def run_monitor_drift(
             report_path=str(html_path),
             data_drift_score=rpt["data_drift_score"],
             dataset_drift=rpt["dataset_drift"],
+            psi_by_column=rpt["psi_by_column"],
             target_drift_score=rpt["target_drift_score"],
             target_drift=rpt["target_drift"],
             prediction_drift_score=rpt["prediction_drift_score"],

@@ -41,6 +41,46 @@ def _app_dsn() -> str:
     return f"postgresql://{user}:{pw}@{host}:{port}/{db}"
 
 
+def _load_production_model():
+    """Load the current Production model for prediction-distribution drift.
+
+    Mirrors ``api/app/model_loader.py``: MLflow registry first
+    (``models:/<MODEL_NAME>/<MODEL_STAGE>``), then the local pickle fallback.
+    Returns ``None`` if neither is available — prediction drift then degrades
+    gracefully (data + target drift still run).
+    """
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    model_name = os.getenv("MODEL_NAME")
+    if tracking_uri and model_name:
+        try:
+            import mlflow
+            import mlflow.sklearn
+
+            mlflow.set_tracking_uri(tracking_uri)
+            stage = os.getenv("MODEL_STAGE", "Production")
+            uri = f"models:/{model_name}/{stage}"
+            print(f"[evaluate_and_monitor] loading model from MLflow: {uri}")
+            return mlflow.sklearn.load_model(uri)
+        except Exception as exc:
+            print(f"[evaluate_and_monitor] MLflow model load failed ({exc}); trying pickle")
+
+    pickle_path = Path(
+        os.getenv(
+            "MODEL_PICKLE_PATH",
+            "/opt/project/models/artifacts/baseline.pkl",
+        )
+    )
+    if pickle_path.exists():
+        import pickle
+
+        print(f"[evaluate_and_monitor] loading model from pickle: {pickle_path}")
+        with open(pickle_path, "rb") as fh:
+            return pickle.load(fh)
+
+    print("[evaluate_and_monitor] no model available; prediction drift will be skipped")
+    return None
+
+
 def _upload_report(client, local_path: Path, run_date: str) -> str:
     """Upload the HTML report to s3://monitoring/{run_date}/report.html."""
     key = f"{run_date}/report.html"
@@ -54,7 +94,11 @@ def _upload_report(client, local_path: Path, run_date: str) -> str:
 
 
 def _record_report(dsn: str, run_date: str, report_url: str, result) -> None:
-    """Insert a pointer row into `monitoring_reports` for the dashboard to read."""
+    """Insert a pointer row into `monitoring_reports` for the dashboard to read.
+
+    Same row shape as before — the combined Evidently HTML carries the
+    prediction-drift + PSI detail; ``drift_score`` holds the data-drift score.
+    """
     import psycopg2
 
     conn = psycopg2.connect(dsn)
@@ -69,8 +113,8 @@ def _record_report(dsn: str, run_date: str, report_url: str, result) -> None:
                         run_date,
                         "data_drift",
                         report_url,
-                        float(result.drift_score),
-                        not result.passed_gate,
+                        float(result.data_drift_score),
+                        bool(result.blocked),
                     ),
                 )
     finally:
@@ -78,26 +122,30 @@ def _record_report(dsn: str, run_date: str, report_url: str, result) -> None:
 
 
 def _task_drift(**context) -> dict:
-    from monitoring.drift_checks import run_drift_check
+    from monitoring.drift_checks import run_monitor_drift
 
     run_date = context["ds"]  # YYYY-MM-DD logical date
+    dsn = _app_dsn()
 
-    result = run_drift_check()
+    # Score the Production model so prediction-distribution drift is computed;
+    # prefer logged predictions for the current window, falling back to silver.
+    result = run_monitor_drift(model=_load_production_model(), dsn=dsn)
 
     report_url = _upload_report(_minio_client(), Path(result.report_path), run_date)
-    _record_report(_app_dsn(), run_date, report_url, result)
+    _record_report(dsn, run_date, report_url, result)
 
-    blocked = not result.passed_gate
     print(
-        f"[evaluate_and_monitor] {run_date}: drift_score={result.drift_score:.3f} "
-        f"passed_gate={result.passed_gate} blocked={blocked} "
-        f"evidently_ran={result.evidently_ran} -> {report_url}"
+        f"[evaluate_and_monitor] {run_date}: data_drift={result.data_drift_score:.3f} "
+        f"target_drift={result.target_drift_score} pred_drift={result.prediction_drift_score} "
+        f"psi_by_column={result.psi_by_column} blocked={result.blocked} "
+        f"used_model={result.used_model} evidently_ran={result.evidently_ran} -> {report_url}"
     )
     # Return an XCom-light, JSON-serializable summary (no html bytes).
     return {
-        "drift_score": result.drift_score,
-        "passed_gate": result.passed_gate,
-        "blocked": blocked,
+        "drift_score": result.data_drift_score,
+        "target_drift_score": result.target_drift_score,
+        "prediction_drift_score": result.prediction_drift_score,
+        "blocked": result.blocked,
         "evidently_ran": result.evidently_ran,
         "n_reference": result.n_reference,
         "n_current": result.n_current,
@@ -119,7 +167,7 @@ def _should_retrain(**context) -> bool:
 
 with DAG(
     dag_id="evaluate_and_monitor",
-    description="Every-6h Evidently drift report → MinIO + monitoring_reports",
+    description="Every-6h Evidently data+target+prediction drift (PSI) → MinIO + monitoring_reports",
     start_date=datetime(2025, 1, 1),
     schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,

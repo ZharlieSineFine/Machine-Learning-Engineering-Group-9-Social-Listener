@@ -15,14 +15,33 @@ two places, both backed by `monitoring/drift_checks.py`:
 
 | Check | Source | Threshold | Action on fail |
 |---|---|---|---|
-| Data drift (text-length, rating, source mix) | Training frame vs. recent silver window | share of drifted columns ≥ `DRIFT_THRESHOLD` (0.3) | Flag in dashboard; in the cycle gate, block promotion |
-| Target drift (label distribution) | Training labels vs. rating-derived labels on the current window | Evidently `TargetDriftPreset` | Flag in dashboard |
+| Data drift (text-length, rating, source mix) | Training frame vs. recent current window | per-column **PSI** ≥ `DRIFT_PSI_THRESHOLD` (0.2); blocks when share of drifted columns ≥ `DRIFT_THRESHOLD` (0.3) | Flag in dashboard / fire retrain; in the cycle gate, block promotion |
+| Target drift (label distribution) | Training labels vs. rating-derived labels on the current window | label **PSI** ≥ `DRIFT_PSI_THRESHOLD` (0.2) | Flag in dashboard / fire retrain |
+| Prediction-distribution drift (predicted-label mix) | Model scored on reference vs. predicted labels on the current window | prediction **PSI** ≥ `DRIFT_PSI_THRESHOLD` (0.2) | Flag in dashboard / fire retrain |
 | Performance — macro-F1 | Model scored on reference vs. current | F1-macro drop > `DRIFT_F1_DROP_THRESHOLD` (3%) | **Block** `Staging → Production` |
 | Performance — negative-class recall | Model scored on reference vs. current | recall_neg drop > `DRIFT_RECALL_NEG_DROP_THRESHOLD` (5%) | **Block** `Staging → Production` |
 
+PSI (Population Stability Index) is the stattest applied to every column — data
+features, the target label, and the prediction column. Standard bands: **< 0.1
+no shift, 0.1–0.2 moderate, > 0.2 significant**. The observational monitor
+(`run_monitor_drift`) emits one combined Evidently report covering all three
+drift types; `MonitorResult.blocked` (data OR target OR prediction drift) drives
+the retrain trigger.
+
+**Current-window source (both/fallback):** the observational monitor prefers the
+`predictions` table (logged production predictions over the last
+`DRIFT_PRED_WINDOW_DAYS`, joined to `reviews` for rating/source) and falls back
+to scoring the Production model on the recent silver window when the table is
+empty.
+
 The gate (`evaluate()`) blocks when **data drift OR either performance metric**
 regresses. The negative class is treated as business-critical (catching negative
-brand sentiment matters most), so it has its own recall guard alongside F1.
+brand sentiment matters most), so it has its own recall guard alongside F1. The
+gate's uploaded report **also covers target + prediction-distribution drift
+(PSI)** — same shape as the observational monitor — but those are informational
+and do **not** change the promote/block decision (that stays data drift +
+measured performance). The model is scored once per side and those predictions
+are reused for both the performance metrics and the prediction-drift column.
 
 ## How the gate works (`evaluate`)
 
@@ -57,9 +76,13 @@ kicks off a fresh ingest→train→gate→promote cycle.
 | Var | Default | Meaning |
 |---|---|---|
 | `DRIFT_THRESHOLD` | `0.3` | Share of drifted columns that blocks |
+| `DRIFT_STATTEST` | `psi` | Evidently per-column stattest |
+| `DRIFT_PSI_THRESHOLD` | `0.2` | PSI value at/above which a column is "drifted" |
 | `DRIFT_F1_DROP_THRESHOLD` | `0.03` | Macro-F1 drop that blocks |
 | `DRIFT_RECALL_NEG_DROP_THRESHOLD` | `0.05` | Negative-class recall drop that blocks |
 | `DRIFT_RECENT_PARTITIONS` | `7` | How many recent silver `review_date=` partitions form `current` |
+| `DRIFT_PRED_WINDOW_DAYS` | `7` | Days of logged predictions forming `current` when the predictions table is used |
+| `MODEL_NAME` / `MODEL_STAGE` | — / `Production` | MLflow model the monitor scores for prediction drift (pickle fallback otherwise) |
 | `DRIFT_SILVER_ROOT` / `DRIFT_SAMPLE_CSV` | container/repo defaults | Override input locations |
 
 When no silver partitions exist yet, the observational check degrades to

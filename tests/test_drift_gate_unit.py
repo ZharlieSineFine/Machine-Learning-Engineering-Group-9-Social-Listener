@@ -185,6 +185,29 @@ def test_evaluate_does_not_block_when_model_stable():
     assert result["blocked_promotion"] is False
 
 
+def test_evaluate_reports_prediction_drift():
+    """The gate report now also surfaces prediction-distribution drift (PSI),
+    even though it doesn't change the promote/block decision."""
+    reference = _balanced(120)
+    current = _balanced(120)
+
+    class ShiftModel:
+        """Predicts the reference label mix on ref, then all-positive on cur."""
+        def __init__(self):
+            self._mode = "ref"
+
+        def predict(self, texts):
+            if self._mode == "ref":
+                self._mode = "cur"
+                return reference["label"].tolist()[:len(texts)]
+            return ["positive"] * len(texts)
+
+    result = evaluate(reference, current, FakeConn(), FakeMinIO(), model=ShiftModel())
+    assert "prediction_drift" in result
+    assert result["prediction_drift_score"] is not None
+    assert "psi_by_column" in result
+
+
 def test_evaluate_uploads_report_even_when_blocked():
     """Report must be uploaded BEFORE the raise so failures stay debuggable."""
     reference = _balanced(60)

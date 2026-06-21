@@ -218,7 +218,9 @@ def _task_gate(**context) -> dict:
     print(
         f"[full_cycle.gate] blocked_promotion={result['blocked_promotion']} "
         f"drift_score={result['drift_score']:.3f} f1_drop={result['f1_drop']} "
-        f"recall_neg_drop={result['recall_neg_drop']} -> {result['report_url']}"
+        f"recall_neg_drop={result['recall_neg_drop']} "
+        f"prediction_drift_score={result.get('prediction_drift_score')} "
+        f"(informational) -> {result['report_url']}"
     )
     return result
 
