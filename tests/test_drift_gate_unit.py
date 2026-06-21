@@ -11,6 +11,8 @@ from typing import List
 import pandas as pd
 import pytest
 
+pytest.importorskip("evidently")  # drift checks need Evidently; skip cleanly if it's absent
+
 from monitoring.drift_checks import (
     DEFAULT_RECALL_NEG_DROP_THRESHOLD,
     PromotionBlocked,

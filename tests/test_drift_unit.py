@@ -8,6 +8,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+pytest.importorskip("evidently")  # drift checks need Evidently; skip cleanly if it's absent
+
 from monitoring.drift_checks import (
     DEFAULT_DRIFT_THRESHOLD,
     DriftResult,

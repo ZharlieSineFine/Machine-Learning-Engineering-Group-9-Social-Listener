@@ -16,6 +16,8 @@ import pandas as pd
 import psycopg2
 import pytest
 
+pytest.importorskip("evidently")  # drift checks need Evidently; skip cleanly if it's absent
+
 from monitoring.drift_checks import (
     DEFAULT_BUCKET,
     PromotionBlocked,

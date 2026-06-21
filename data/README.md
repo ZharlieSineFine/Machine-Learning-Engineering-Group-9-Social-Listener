@@ -24,7 +24,7 @@ data/
 
 │   ├── malaysia_review_loader.py # Malaysia TripAdvisor → raw reviews.csv (+ provenance)
 
-│   └── replay.py
+│   └── replay.py     # Replay simulator: demo_data (stable/spike) -> data/replay/<scenario>/
 
 ├── refine/         # BRONZE → SILVER → GOLD. Join, clean, dedup, label derivation.
 
@@ -117,13 +117,44 @@ Rows with unparseable dates land in `review_date=__null__` and join the in-time 
 
 |---|---|---|
 
-| **Sources** | external; replay simulator (`ingest/replay.py`) | URLs / `data/sample/` |
+| **Sources** | external; replay simulator (`ingest/replay.py`) | URLs / `data/sample/` (seed); `demo_data/` (replay stable/spike windows) |
 
 | **Bronze** — raw + provenance | `ingest/*.py`, `run_daily.py` | MinIO `s3://datasets/bronze/{source}/dt={YYYY-MM-DD}/` |
 
 | **Silver** — validated, deduped | `refine/build_silver.py` + GE gate | Postgres `reviews_silver` + `data/silver/reviews/` |
 
 | **Gold** — per-review features + labels | `refine/build_gold.py` | `data/gold/feature_store/` + `data/gold/label_store/` |
+
+## Publishing to MinIO + Postgres
+
+The on-disk medallion under `data/` is the working copy. `data/publish.py` (backed by the
+`data/storage/` package) mirrors it to the **MinIO** object store and upserts the Silver /
+Gold tables into **Postgres** — the layout ARCHITECTURE.md §3/§7 targets.
+
+| What | Where |
+|---|---|
+| Bronze / Silver / Gold objects | MinIO `s3://datasets/{bronze, silver/reviews, gold}/…` (mirrors the on-disk Hive paths) |
+| Harmonised reviews (no labels) | Postgres `reviews_silver`, PK `(source, source_id)` |
+| Training set (features + label) | Postgres `reviews_gold`, PK `review_id` (= Silver `source_id`) |
+
+Connection settings come from the env (`infra/.env.example` → `data/storage/config.py`).
+Inside the docker network the hosts are the service aliases (`postgres`, `minio`); for a
+host-side run, override `POSTGRES_HOST=localhost` and `MLFLOW_S3_ENDPOINT_URL=http://localhost:9000`.
+
+```bash
+# whole local medallion -> MinIO + Postgres
+python -m data.publish --to all
+
+# host-side (containers up), against the mapped ports
+POSTGRES_HOST=localhost MLFLOW_S3_ENDPOINT_URL=http://localhost:9000 python -m data.publish --to all
+
+# or publish as part of a daily run (only the partitions it touched)
+python -m data.run_daily --run-date 2026-06-21 --sources tripadvisor --publish
+```
+
+Upserts are idempotent (`ON CONFLICT … DO UPDATE`), so re-publishing a date is safe. The
+DDL is applied by `infra/docker/postgres/init.sql` on first boot **and** by
+`data/storage/warehouse.ensure_schema`, so the publisher is self-sufficient.
 
 
 
@@ -292,6 +323,6 @@ Change a contract column? Open a PR that updates the CSV, the Pydantic schemas i
 
 
 
-`data/sample/reviews_sample.csv` is committed (~1k labelled rows) so the smoke test never needs network. The Phase 2 `replay` simulator reads from this same shape.
+`data/sample/reviews_sample.csv` is committed (~1k labelled rows) so the smoke test never needs network. The Phase 2 `replay` simulator instead replays the purpose-built demo windows in `demo_data/` (`stable` / `spike`) — see [ARCHITECTURE.md §Replay simulator](../ARCHITECTURE.md).
 
 

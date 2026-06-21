@@ -81,10 +81,19 @@ Reviews are **immutable events**, not monthly state snapshots. The daily driver 
 
 ### Replay simulator
 
-Lives in `data/ingest/replay.py`. Replays a fixed timeline of reviews into Bronze at configurable speed, so the team can:
-- Demo drift detection (poison a window with negative reviews → see Evidently fire)
-- Reproduce bugs deterministically
-- Smoke-test the whole pipeline in CI without external network calls
+Lives in `data/ingest/replay.py`. Replays a pre-built demo window (`demo_data/`) as a
+time-ordered BrewLeaf "operational" stream at configurable speed, written to
+`data/replay/<scenario>/review_date=YYYY-MM-DD/part.parquet` — a standalone stream the
+monitoring step consumes as the "current" window (it does not round-trip through Bronze).
+
+Two scenarios drive the drift demo (both June 2026, the same 2,056 reviews and overall label
+mix — only the *timing* of negatives differs):
+- `stable` — negatives steady at ~19-20%/day → the drift gate should pass
+- `spike` — ~17-18%/day, then a sudden 60% on 2026-06-21 → the drift gate should fire
+
+The spike is baked into the demo data (no synthetic drift injection), and the demo windows
+carry no shop-name column, so the text is replayed verbatim (no brand replacement). Run:
+`python -m data.ingest.replay --scenario {stable,spike}`.
 
 ---
 
@@ -164,7 +173,7 @@ mle_project/
 │   ├── ingest/                   # SOURCES → BRONZE (raw, source-native + provenance)
 │   │   ├── yelp_loader.py        # Yelp tar → dt= partitions (reviews + business)
 │   │   ├── malaysia_review_loader.py  # Malaysia TripAdvisor → dt= partitions
-│   │   └── replay.py             # Replay simulator
+│   │   └── replay.py             # Replay simulator (demo_data stable/spike)
 │   ├── refine/                   # BRONZE → SILVER (join, clean, dedup); Silver → Gold (labels)
 │   │   ├── build_silver.py       # Bronze → review_date= Silver parquet partitions
 │   │   ├── build_gold.py         # Silver → feature_store + label_store partitions
@@ -271,6 +280,14 @@ human_corrections (
 ```
 
 The training DAG joins `reviews_gold` with `human_corrections` and prefers human labels when present — that's how the feedback loop closes. The Gold builder derives `label` from `rating` (`<=2 → negative`, `3 → neutral`, `>=4 → positive`) via `label_from_rating()` in `data/refine/build_gold.py`.
+
+> **Implemented schema (prototype).** The medallion keys on the loaders' natural **string**
+> ids, so the live `reviews_silver` / `reviews_gold` tables (DDL in
+> `infra/docker/postgres/init.sql`, mirrored in `data/storage/warehouse.py`) use
+> `PRIMARY KEY (source, source_id)` and `review_id` (= Silver `source_id`) rather than the
+> `BIGSERIAL` ids sketched above, and **Silver carries no `label`** (labels live only in
+> Gold). `data/publish.py` populates these tables and mirrors the bronze/silver/gold objects
+> to MinIO `s3://datasets/…` from the on-disk medallion (see [data/README.md](../data/README.md#publishing-to-minio--postgres)).
 
 ---
 

@@ -89,6 +89,7 @@ data/local/
 data/bronze/
 data/silver/
 data/gold/
+data/replay/
 *.parquet
 data/demo_data/
 
