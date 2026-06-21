@@ -23,13 +23,16 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-    MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+    # In-network service hosts are the compose aliases — hard-code them so a host-side
+    # script that exports POSTGRES_HOST=localhost (for its own psycopg2) can't leak into
+    # the airflow containers via ${...} interpolation at `docker compose up` time.
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_S3_ENDPOINT_URL: http://minio:9000
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    POSTGRES_HOST: ${POSTGRES_HOST}
+    POSTGRES_HOST: postgres
     POSTGRES_PORT: ${POSTGRES_PORT}
     POSTGRES_DB: ${POSTGRES_DB}
   volumes:
@@ -190,9 +193,12 @@ services:
       POSTGRES_HOST: postgres
     ports:
       - "8501:8501"
+    # The marketing dashboard reads the reviews table from Postgres directly; it does
+    # not need the API to render. (The MLOps-monitor page calls the API but degrades
+    # gracefully when it's down.) Depend on Postgres so the dashboard is independent.
     depends_on:
-      api:
-        condition: service_started
+      postgres:
+        condition: service_healthy
 
   smoke:
     # Phase 1 smoke test. Runs tests/test_smoke.py in an isolated container
