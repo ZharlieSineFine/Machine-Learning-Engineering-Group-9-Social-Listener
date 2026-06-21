@@ -20,7 +20,7 @@ import pandas as pd
 from datetime import date, timedelta
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SAMPLE_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
+DEFAULT_SAMPLE_CSV = ROOT / "data" / "demo_data" / "demo_jun2026_stable.csv"
 DEFAULT_GOLD_ROOT = ROOT / "data" / "gold"
 
 # Stopwords for the negative-reviews word cloud. Intentionally tiny — the

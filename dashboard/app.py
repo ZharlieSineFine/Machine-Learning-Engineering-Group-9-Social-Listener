@@ -72,7 +72,7 @@ st.set_page_config(
     page_title="BrewLeaf · Brand Sentiment",
     page_icon="🍃",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
  
 st.markdown(f"""
@@ -83,6 +83,8 @@ st.markdown(f"""
  
 /* ── Hide default Streamlit chrome ── */
 #MainMenu, footer, header {{ visibility: hidden; }}
+[data-testid="collapsedControl"] {{ display: block !important; }}
+section[data-testid="stSidebar"] {{ display: block !important; }}
  
 /* ── Metric tiles ── */
 [data-testid="stMetric"] {{
@@ -185,7 +187,7 @@ def _section_title(icon: str, title: str) -> str:
 # ---------------------------------------------------------------------------
  
 @st.cache_data(ttl=300)   # refresh every 5 minutes
-def _load(days: int, csv_path: str = "") -> pd.DataFrame:
+def _load(days: int) -> pd.DataFrame:
     dsn = None
     user = os.getenv("POSTGRES_USER")
     pw   = os.getenv("POSTGRES_PASSWORD")
@@ -197,8 +199,7 @@ def _load(days: int, csv_path: str = "") -> pd.DataFrame:
         
     return load_reviews(
         dsn=dsn,
-        gold_root=DEFAULT_GOLD_ROOT if not csv_path else None,
-        csv_path=Path(csv_path) if csv_path else None,
+        gold_root=DEFAULT_GOLD_ROOT,
         days=days,
     )
  
@@ -206,6 +207,38 @@ def _load(days: int, csv_path: str = "") -> pd.DataFrame:
 # Section renderers
 # ---------------------------------------------------------------------------
  
+
+def render_nav(active: str = "marketing") -> None:
+    """Top navigation bar — shared between marketing and MLOps pages."""
+    marketing_style = (
+        f"background:{TEAL};color:#fff;"
+        if active == "marketing"
+        else f"background:transparent;color:{TEXT_SEC};border:1px solid {BORDER};"
+    )
+    mlops_style = (
+        f"background:{TEAL};color:#fff;"
+        if active == "mlops"
+        else f"background:transparent;color:{TEXT_SEC};border:1px solid {BORDER};"
+    )
+    st.markdown(
+        f"""<div style="display:flex;gap:8px;margin-bottom:12px;">
+            <span style="font-size:11px;color:{TEXT_SEC};
+                         align-self:center;margin-right:4px;
+                         text-transform:uppercase;letter-spacing:0.05em;">View</span>
+            <a href="/" target="_self"
+               style="text-decoration:none;padding:5px 16px;border-radius:8px;
+                      font-size:12px;font-weight:600;{marketing_style}">
+               🍃 Marketing
+            </a>
+            <a href="/mlops_monitor" target="_self"
+               style="text-decoration:none;padding:5px 16px;border-radius:8px;
+                      font-size:12px;font-weight:600;{mlops_style}">
+               🔬 MLOps Monitor
+            </a>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
 def render_header(pct_neg: float) -> None:
     left, right = st.columns([3, 1])
  
@@ -279,7 +312,7 @@ def render_kpi_tiles(df: pd.DataFrame) -> None:
     c4.metric("Neutral sentiment", f"{pct_neu:.1f}%")
  
  
-def render_timeline(df: pd.DataFrame, csv_path: str = "") -> None:
+def render_timeline(df: pd.DataFrame) -> None:
     freq = st.radio(
         "Group by",
         ["D", "W"],
@@ -293,7 +326,7 @@ def render_timeline(df: pd.DataFrame, csv_path: str = "") -> None:
     label = "14 days" if freq == "D" else "8 weeks"
     inner = _section_title("📈", f"Sentiment trend — {label}")
 
-    df = _load(days, csv_path=csv_path)
+    df = _load(days)
     timeline = sentiment_timeline(df, freq=freq, time_col="review_date")
  
     fig = go.Figure()
@@ -460,23 +493,6 @@ def render_word_cloud(df: pd.DataFrame) -> None:
         st.markdown("</div>", unsafe_allow_html=True)
  
  
-def render_topic_breakdown() -> None:
-    inner = _section_title("🏷", "Topic breakdown (24h)")
-    placeholder = f"""
-    <div style="border:1px dashed {BORDER};border-radius:8px;
-                padding:24px;text-align:center;margin-top:4px;">
-        <p style="margin:0;font-size:14px;color:{TEXT_SEC};font-weight:600;">
-            🚧 &nbsp;Stretch goal — Phase 2
-        </p>
-        <p style="margin:8px 0 0;font-size:12px;color:{TEXT_SEC};line-height:1.6;">
-            Topic clustering (K-Means / BERTopic) will populate this panel
-            once the models layer is complete. Each bar will show what % of
-            negative posts mention a topic such as service, wait time, or
-            drink quality.
-        </p>
-    </div>"""
-    _card(inner + placeholder)
-
 
 def render_mlflow_ab() -> None:
     st.subheader("Model A/B — recent MLflow runs")
@@ -525,25 +541,13 @@ def render_drift_report(dsn: Optional[str]) -> None:
 # ---------------------------------------------------------------------------
  
 def main() -> None:
-    demo_root = Path(os.getenv("DEMO_DATA_ROOT", str(ROOT / "data" / "demo_data")))
-    demo_files = {
-        "Stable (normal sentiment)": str(demo_root / "demo_jun2026_stable.csv"),
-        "Spike (Jun 21 crisis)":     str(demo_root / "demo_jun2026_spike.csv"),
-        "Original sample (2022)":    str(demo_root / "demo_holdout_full.csv"),
-    }
-    chosen = st.radio(
-        "🎬 Demo dataset",
-        list(demo_files.keys()),
-        horizontal=True,
-        index=0,
-        key="demo_choice",
-    )
-    csv_path = demo_files[chosen]
+    render_nav(active="marketing")
+
 
     # Default load uses the daily window (14 days).
     # render_timeline() will call _load() again with 60 days if weekly is selected —
     # _load is cached so the extra call costs nothing on repeated toggles.
-    df = _load(DAYS_BY_FREQ["W"], csv_path=csv_path)
+    df = _load(DAYS_BY_FREQ["W"])
     pct_neg = _pct(df, "negative")
  
     # ── Header ──────────────────────────────────────────────────────────────
@@ -560,18 +564,14 @@ def main() -> None:
     # on a 14-day window regardless of the chart toggle.
     col_left, col_right = st.columns([1.45, 1])
     with col_left:
-        render_timeline(df, csv_path=csv_path)
+        render_timeline(df)
     with col_right:
         render_alerts(df, n=4)
  
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
  
-    # ── Topic breakdown  |  Word cloud ──────────────────────────────────────
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        render_topic_breakdown()
-    with col_b:
-        render_word_cloud(df)
+    # ── Word cloud ───────────────────────────────────────────────────────────
+    render_word_cloud(df)
  
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
  
