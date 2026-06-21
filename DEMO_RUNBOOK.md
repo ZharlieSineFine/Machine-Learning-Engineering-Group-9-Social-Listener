@@ -29,7 +29,7 @@ Set up two windows side by side:
    `pyarrow`, `psycopg2`, `sqlalchemy`.
 4. Build the images once (a few minutes):
    ```powershell
-   docker compose build postgres minio mlflow airflow-init dashboard
+   docker compose build
    ```
 
 ---
@@ -37,14 +37,15 @@ Set up two windows side by side:
 ## The demo — two commands
 
 ```powershell
-# STEP 0 (optional, first run): bring the whole stack up
-docker compose up -d
+# STEP 0 (first run only): build the images (a few minutes)
+docker compose build
 
 # STEP 1 — normal day
 .\scripts\demo_up.ps1
-#   -> starts postgres, minio, mlflow, airflow, dashboard
-#   -> generates the replay streams + scores a clean 2-week history
-#   -> open http://localhost:8501  (Sentiment normal, ~20% negative)   [~30s]
+#   -> starts postgres, minio, mlflow, airflow, dashboard, API
+#   -> registers the champion in MLflow (Production + Staging), scores a clean
+#      2-week history, seeds the shadow-deploy panel
+#   -> open http://localhost:8501  (Sentiment normal, ~20% negative)   [~40s]
 
 # STEP 2 — inject the spike
 .\scripts\demo_spike.ps1
@@ -84,18 +85,22 @@ replay simulator ──► champion model (batch_infer) ──► reviews table 
 
 ---
 
-## Do we need MLflow and FastAPI?
+## MLflow + FastAPI (wired in)
 
-**Not on the critical path.** The dashboard reads predictions straight from Postgres,
-and Airflow runs the drift→retrain loop. So the demo needs only **Postgres + batch
-inference + Airflow + the dashboard**.
+The spike→alert path doesn't *depend* on them (the dashboard reads predictions from
+Postgres; Airflow runs the drift→retrain loop), so they stay off the critical path —
+but `demo_up` now brings them up for the full MLOps story:
 
-- **MLflow** runs alongside as the model registry / run-history view on the MLOps
-  monitor page. Inference loads the champion pickle directly (faster, no dependency).
-- **FastAPI** is an optional live-serving lane. It's left out of the demo bring-up
-  because it needs a registered/string-label model; the marketing dashboard doesn't
-  use it. To enable it later: register the champion in MLflow (or mount the pickle +
-  map integer classes to labels), then `docker compose up -d api`.
+- **MLflow** is the model registry. `demo_up` registers the champion (idempotently,
+  `scripts/register_champion.py`) as `sentiment-baseline` **v1 → Production**
+  (neg threshold 0.46) and **v2 → Staging** (0.40, the shadow challenger). Browse them
+  at http://localhost:5001. Batch inference still loads the local pickle directly
+  (faster); the API loads from the registry.
+- **FastAPI** is the live serving lane. `/health` reports `model_source: mlflow`,
+  `/predict` returns real string labels, and every call is scored by **both** Production
+  and Staging and logged to `/shadow/log` — which feeds the dashboard's **MLOps Monitor
+  → Shadow deploy** panel. `demo_up` seeds that panel with a sample batch
+  (`scripts/seed_shadow.py`).
 
 ---
 
@@ -104,8 +109,9 @@ inference + Airflow + the dashboard**.
 | Service | URL | Notes |
 |---|---|---|
 | Dashboard | http://localhost:8501 | Marketing view + MLOps Monitor page |
+| API (FastAPI) | http://localhost:8000/docs | /health, /predict, /predict/batch, /shadow/log |
 | Airflow | http://localhost:8080 | airflow / airflow |
-| MLflow | http://localhost:5001 | registry / runs |
+| MLflow | http://localhost:5001 | registry — sentiment-baseline: Production + Staging |
 | MinIO console | http://localhost:9001 | minioadmin / minioadmin |
 
 ---

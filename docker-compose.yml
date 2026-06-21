@@ -41,6 +41,8 @@ x-airflow-common: &airflow-common
     - ./models:/opt/project/models
     - ./data:/opt/project/data
     - ./monitoring:/opt/project/monitoring
+    - ./scripts:/opt/project/scripts
+    - ./serving:/opt/project/serving
     - ${YELP_DATA_HOST:-../../Yelp_JSON}:/data/raw/yelp:ro
     - ${TRIPADVISOR_DATA_HOST:-../../TripAdvisor_data_cleaned.csv}:/data/raw/tripadvisor:ro
   depends_on:

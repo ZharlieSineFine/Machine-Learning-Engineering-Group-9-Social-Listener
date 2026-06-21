@@ -8,7 +8,7 @@ import os
 
 from fastapi import FastAPI, Header, HTTPException
 
-from app.model_loader import LoadedModel, load_model
+from app.model_loader import LoadedModel, load_model, load_staging_model
 from app.schemas import (
     BatchPredictRequest,
     BatchPredictResponse,
@@ -16,7 +16,9 @@ from app.schemas import (
     PredictRequest,
     PredictResponse,
     ReloadResponse,
+    ShadowLogEntry,
 )
+from app import shadow
 
 app = FastAPI(title="Sentiment API", version="0.2.0")
 
@@ -26,6 +28,9 @@ app = FastAPI(title="Sentiment API", version="0.2.0")
 # through Redis/SIGHUP instead.
 _model: LoadedModel | None = load_model()
 
+# Staging model — optional. Present only when Van has promoted a candidate
+# to Staging in MLflow. Shadow predictions run silently alongside Production.
+_staging_model: LoadedModel | None = load_staging_model()
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
@@ -40,17 +45,32 @@ def health() -> HealthResponse:
 def predict(req: PredictRequest) -> PredictResponse:
     if _model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
-    
+
     # Input validation
     MAX_CHARS = 1000
     if len(req.text) > MAX_CHARS:
         raise HTTPException(status_code=422, detail=f"text exceeds {MAX_CHARS} character limit")
-    
+
     cleaned = "".join(ch for ch in req.text if ch.isprintable())
     if not cleaned.strip():
         raise HTTPException(status_code=422, detail="text is empty after cleaning")
-    pred = _model.pipeline.predict([req.text])
-    return PredictResponse(label=str(pred[0]))
+
+    # Production prediction — this is what the caller receives.
+    production_label = str(_model.pipeline.predict([req.text])[0])
+
+    # Shadow prediction — runs silently if a Staging model is loaded.
+    staging_label: str | None = None
+    if _staging_model is not None:
+        staging_label = str(_staging_model.pipeline.predict([req.text])[0])
+
+    # Log both to shadow store (dashboard A/B tile reads from here).
+    shadow.record(
+        text=req.text,
+        production_label=production_label,
+        staging_label=staging_label,
+    )
+
+    return PredictResponse(label=production_label)
 
 
 @app.post("/predict/batch", response_model=BatchPredictResponse)
@@ -59,8 +79,27 @@ def predict_batch(req: BatchPredictRequest) -> BatchPredictResponse:
     if _model is None:
         raise HTTPException(status_code=503, detail="model not loaded")
 
-    preds = _model.pipeline.predict(req.texts)
-    return BatchPredictResponse(labels=[str(p) for p in preds])
+    production_labels = [str(p) for p in _model.pipeline.predict(req.texts)]
+
+    # Shadow the batch too if Staging is loaded.
+    if _staging_model is not None:
+        staging_labels = [str(p) for p in _staging_model.pipeline.predict(req.texts)]
+        for text, prod, stag in zip(req.texts, production_labels, staging_labels):
+            shadow.record(text=text, production_label=prod, staging_label=stag)
+    else:
+        for text, prod in zip(req.texts, production_labels):
+            shadow.record(text=text, production_label=prod, staging_label=None)
+
+    return BatchPredictResponse(labels=production_labels)
+
+
+@app.get("/shadow/log", response_model=list[ShadowLogEntry])
+def shadow_log() -> list[ShadowLogEntry]:
+    """Return all shadow prediction pairs. Used by the dashboard A/B tile.
+    
+    TODO (Phase 2): replace with a DB query once predictions table is live.
+    """
+    return shadow.get_log()
 
 
 @app.post("/reload", response_model=ReloadResponse)
@@ -78,8 +117,9 @@ def reload_model(x_admin_token: str | None = Header(default=None)) -> ReloadResp
     if not x_admin_token or x_admin_token != expected:
         raise HTTPException(status_code=401, detail="invalid or missing admin token")
 
-    global _model
+    global _model, _staging_model
     _model = load_model()
+    _staging_model = load_staging_model()
     return ReloadResponse(
         status="ok",
         model_loaded=_model is not None,
