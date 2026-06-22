@@ -137,64 +137,63 @@ def _runs_from_checkpoints() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+_MODEL_FAMILIES = {"sentiment-baseline": "TF-IDF LR", "sentiment-distilbert": "DistilBERT"}
+_STAGE_ORDER = {"production": 0, "staging": 1, "none": 2, "archived": 3}
+
+
 @st.cache_data(ttl=60)
 def _fetch_mlflow_runs() -> pd.DataFrame:
-    """Pull run history from MLflow via compare_mlflow_models helpers.
-    Falls back to checkpoint trainer_state.json files if MLflow is unreachable
-    or has no runs yet (e.g. docker compose up but Van hasn't registered models)."""
-    try:
-        from scripts.compare_mlflow_models import (
-            fetch_experiment_runs,
-            fetch_registry_versions,
-            LOGREG_RUNS,
-            DISTILBERT_RUNS,
-            resolve_tracking_uri,
-        )
-        uri = resolve_tracking_uri(ROOT)
-
-        logreg     = fetch_experiment_runs("sentiment-tfidf-logreg", LOGREG_RUNS, uri)
-        distilbert = fetch_experiment_runs("sentiment-distilbert", DISTILBERT_RUNS, uri)
-
-        rows = []
-        for df, model_type in [(logreg, "TF-IDF LR"), (distilbert, "DistilBERT")]:
-            if df.empty:
-                continue
-            for _, r in df.iterrows():
-                rows.append({
-                    "run_id":     str(r.get("run_id", ""))[:7],
-                    "model":      model_type,
-                    "run_name":   r.get("run_name", ""),
-                    "f1_macro":   r.get("test_f1_macro"),
-                    "f1_neg":     r.get("test_f1_negative"),
-                    "recall_neg": r.get("test_recall_negative"),
-                    "status":     "archived",
-                    "source":     "mlflow",
-                })
-
-        # Overlay stage from registry
+    """Run rows for the model panels, driven by the MLflow **registry** so the TRUE
+    Production model is shown (regardless of run-name conventions). Reads each
+    registered version's stage + linked run metrics directly via MlflowClient — no
+    dependency on a shipped helper module. Falls back to static checkpoint metrics
+    only when MLflow is unreachable / empty.
+    """
+    uri = os.getenv("MLFLOW_TRACKING_URI")
+    if uri:
         try:
-            from scripts.compare_mlflow_models import REGISTERED_MODELS
-            for model_name in REGISTERED_MODELS:
-                versions = fetch_registry_versions(model_name, uri)
-                for _, v in versions.iterrows():
-                    rid_short = str(v["run_id"])[:7]
-                    stage = str(v.get("stage", "archived")).lower()
-                    for row in rows:
-                        if row["run_id"] == rid_short:
-                            row["status"] = stage
+            from mlflow.tracking import MlflowClient
+
+            client = MlflowClient(uri)
+            rows = []
+            for name, family in _MODEL_FAMILIES.items():
+                try:
+                    versions = client.search_model_versions(f"name='{name}'")
+                except Exception:
+                    continue
+                for v in versions:
+                    stage = (v.current_stage or "None").lower()
+                    try:
+                        run = client.get_run(v.run_id)
+                        metrics = run.data.metrics
+                        run_name = run.data.tags.get("mlflow.runName", "")
+                    except Exception:
+                        metrics, run_name = {}, ""
+
+                    def _m(*keys):
+                        for k in keys:
+                            if metrics.get(k) is not None:
+                                return float(metrics[k])
+                        return None
+
+                    rows.append({
+                        "run_id": str(v.run_id)[:7],
+                        "model": family,
+                        "run_name": run_name or f"v{v.version}",
+                        "f1_macro": _m("f1_macro", "test_f1_macro"),
+                        "f1_neg": _m("f1_neg", "test_f1_negative", "f1_negative"),
+                        "recall_neg": _m("recall_neg", "test_recall_negative"),
+                        "status": stage if stage != "none" else "archived",
+                        "source": "mlflow",
+                        "_version": int(v.version),
+                    })
+            if rows:
+                rows.sort(key=lambda r: (_STAGE_ORDER.get(r["status"], 9), -r["_version"]))
+                return pd.DataFrame(rows)
         except Exception:
             pass
-
-        # MLflow reachable but no runs logged yet → fall back to checkpoints
-        if not rows:
-            st.caption("MLflow reachable but no runs found — showing checkpoint metrics.")
-            return _runs_from_checkpoints()
-
-        return pd.DataFrame(rows)
-
-    except Exception:
-        # MLflow unreachable → fall back to checkpoints
-        return _runs_from_checkpoints()
+    # MLflow unreachable / empty → static checkpoint metrics
+    return _runs_from_checkpoints()
 
 
 @st.cache_data(ttl=30)
