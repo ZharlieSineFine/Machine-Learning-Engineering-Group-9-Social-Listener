@@ -15,7 +15,7 @@ Set up two windows side by side:
 | | Dashboard (browser) | Terminal / backend |
 |---|---|---|
 | **Normal day** | Sentiment timeline flat at ~18–20% negative; green "Sentiment normal" banner | `demo_up` scores a clean 2-week history with the champion model |
-| **Spike** | Latest batch jumps to **~51% negative**; red "⚠ above threshold" alert; timeline spikes today | `demo_spike` → inference → Airflow drift gate **blocks** → retrain DAG **triggered** |
+| **Spike** | Latest batch jumps to **~51% negative**; red "⚠ above threshold" alert; timeline spikes today | `demo_spike` → inference → Airflow drift gate **blocks** → **alert recorded** (no auto-retrain) |
 
 ---
 
@@ -50,8 +50,8 @@ docker compose build
 # STEP 2 — inject the spike
 .\scripts\demo_spike.ps1
 #   -> champion model scores today's negative-review burst  (negative% jumps to ~51%)
-#   -> Airflow evaluate_and_monitor detects drift (score 1.0), blocks the gate,
-#      flags monitoring_reports.triggered_retrain, and triggers medallion_train_cycle
+#   -> Airflow evaluate_and_monitor detects drift (score 1.0), blocks the gate, and
+#      records the monitoring_reports alert row — NO auto-retrain (human-in-the-loop)
 #   -> refresh / watch the dashboard: red alert + today's spike on the timeline  [~15s]
 ```
 
@@ -67,10 +67,11 @@ Re-run anytime: `demo_up` truncates and re-seeds, so the demo is idempotent.
 replay simulator ──► champion model (batch_infer) ──► reviews table ──► dashboard
    (demo_jun2026                 │                        (Postgres)        (Streamlit)
     stable / spike)              │
-                                 └─ spike only ─► Airflow evaluate_and_monitor
+                                 └─ spike only ─► Airflow evaluate_and_monitor (read-only observer)
                                                     ├─ Evidently drift gate (blocked)
-                                                    ├─ monitoring_reports row (+ MinIO HTML)
-                                                    └─ TriggerDagRunOperator ─► medallion_train_cycle (retrain)
+                                                    ├─ monitoring_reports row (+ MinIO HTML) ─► dashboard alert
+                                                    └─ send_alert — human-in-the-loop, NO auto-retrain
+                                                       (a human runs medallion_pipeline FORCE_TRAIN=1 if warranted)
 ```
 
 - **Inference** (`serving/batch_infer.py`): loads the champion pickle, applies the
@@ -81,14 +82,15 @@ replay simulator ──► champion model (batch_infer) ──► reviews table 
   latest batch is ≥ 25% negative. Auto-refreshes every ~5s during the demo.
 - **Monitoring** (`airflow/dags/evaluate_and_monitor.py` + `monitoring/drift_checks.py`):
   with `DRIFT_REPLAY_SCENARIO=spike` the gate compares the spike-day batch vs the
-  holdout baseline, detects target drift, and fires the retrain DAG.
+  holdout baseline, detects the drift, blocks the gate, and records the alert row —
+  no auto-retrain (a human decides whether to retrain off-cycle with `FORCE_TRAIN=1`).
 
 ---
 
 ## MLflow + FastAPI (wired in)
 
 The spike→alert path doesn't *depend* on them (the dashboard reads predictions from
-Postgres; Airflow runs the drift→retrain loop), so they stay off the critical path —
+Postgres; Airflow runs the drift→alert loop), so they stay off the critical path —
 but `demo_up` now brings them up for the full MLOps story:
 
 - **MLflow** is the model registry. `demo_up` registers the champion (idempotently,
