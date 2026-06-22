@@ -55,7 +55,8 @@ Airflow schedules every step on a **6-hour batch inference cycle**.
                                                                       ▼
                                          ┌────────────────────────────────────────┐
                                          │  Train + Register   DistilBERT · MLflow│
-                                         │  Inference (shadow) FastAPI            │
+                                         │  Inference (online) FastAPI /predict  │
+                                         │  Inference (batch)  shadow_score (6h) │
                                          │  Dashboard          Streamlit · alerts │
                                          │  Monitoring         Evidently          │
                                          └────────────────┬───────────────────────┘
@@ -81,19 +82,10 @@ Reviews are **immutable events**, not monthly state snapshots. The daily driver 
 
 ### Replay simulator
 
-Lives in `data/ingest/replay.py`. Replays a pre-built demo window (`demo_data/`) as a
-time-ordered BrewLeaf "operational" stream at configurable speed, written to
-`data/replay/<scenario>/review_date=YYYY-MM-DD/part.parquet` — a standalone stream the
-monitoring step consumes as the "current" window (it does not round-trip through Bronze).
-
-Two scenarios drive the drift demo (both June 2026, the same 2,056 reviews and overall label
-mix — only the *timing* of negatives differs):
-- `stable` — negatives steady at ~19-20%/day → the drift gate should pass
-- `spike` — ~17-18%/day, then a sudden 60% on 2026-06-21 → the drift gate should fire
-
-The spike is baked into the demo data (no synthetic drift injection), and the demo windows
-carry no shop-name column, so the text is replayed verbatim (no brand replacement). Run:
-`python -m data.ingest.replay --scenario {stable,spike}`.
+Lives in `data/ingest/replay.py`. Replays a fixed timeline of reviews into Bronze at configurable speed, so the team can:
+- Demo drift detection (poison a window with negative reviews → see Evidently fire)
+- Reproduce bugs deterministically
+- Smoke-test the whole pipeline in CI without external network calls
 
 ---
 
@@ -128,6 +120,57 @@ carry no shop-name column, so the text is replayed verbatim (no brand replacemen
 
 The shadow window is **two 6-hour batch cycles by default** (12h) before promotion is considered.
 
+### Inference — online serving + scheduled batch
+
+Inference is split across two paths that share the same core in `models/inference.py`:
+
+```
+                    ┌─────────────────────────────────────────────────────┐
+                    │           models/inference.py (shared core)         │
+                    │  load Production + Staging · predict · score        │
+                    └───────────────┬─────────────────────┬───────────────┘
+                                    │                     │
+              ┌─────────────────────┘                     └─────────────────────┐
+              ▼                                                               ▼
+   ┌──────────────────────────┐                              ┌──────────────────────────────┐
+   │  ONLINE — FastAPI        │                              │  BATCH — Airflow             │
+   │  api/app/main.py         │                              │  airflow/dags/shadow_score.py│
+   │  api/app/shadow.py       │                              │  models/batch_score.py       │
+   │                          │                              │                              │
+   │  POST /predict           │                              │  every 6h: score reviews     │
+   │  POST /predict/batch     │                              │  ingested in lookback window │
+   │  POST /reload            │                              │  skip already-scored rows    │
+   └────────────┬─────────────┘                              └──────────────┬───────────────┘
+                │                                                            │
+                │  Production label returned to caller                       │
+                │  Production + Staging rows logged                          │
+                └────────────────────────────┬───────────────────────────────┘
+                                             ▼
+                              ┌──────────────────────────────┐
+                              │  Postgres `predictions`      │
+                              │  (via models/prediction_log) │
+                              └──────────────────────────────┘
+```
+
+| Path | Entry point | Schedule | Serves response? | Logs shadow? |
+|---|---|---|---|---|
+| **Online** | `api/app/main.py` → `api/app/shadow.py` | On demand (`/predict`, `/predict/batch`) | Yes — **Production only** | Yes — both lanes when Staging is loaded |
+| **Batch** | `airflow/dags/shadow_score.py` → `models/batch_score.py` | `0 */6 * * *` (6h) | No — writes to DB only | Yes — both lanes when Staging is loaded |
+
+**Model resolution order** (both paths):
+1. If `MLFLOW_TRACKING_URI` + `MODEL_NAME` are set → pull `models:/<MODEL_NAME>/<MODEL_STAGE>` from the registry.
+2. Otherwise → load the pickle at `MODEL_PICKLE_PATH` (smoke-test / offline fallback).
+
+**Shadow lane** (optional):
+- Controlled by `SHADOW_MODEL_NAME` / `SHADOW_MODEL_STAGE` (defaults: `sentiment-distilbert` / `Staging`).
+- Set `SHADOW_MODEL_NAME=` (empty) to disable.
+- Sklearn Production is fully supported in the API image. DistilBERT Staging loads via `mlflow.pytorch` when `torch` + `transformers` are installed; otherwise the shadow lane is skipped gracefully.
+
+**Batch CLI** (manual / debugging):
+```bash
+python -m models.batch_score --lookback-hours 6
+```
+
 ### Train / validation / test / OOT split
 
 `train_model` doesn't split the Gold set at random. It uses the **Silver** `date` column (normalised to ISO from each source's raw Bronze stamp) to build an **out-of-time (OOT)** hold-out (`models/splits.py`): the most recent slice of reviews (by timestamp) is set aside as a stand-in for "reviews that arrive after we ship", and everything older is split — stratified on label — into **train** (fit), **validation** (tune / model selection), and **test** (in-time estimate).
@@ -150,22 +193,25 @@ mle_project/
 │   │   ├── refine_silver.py      # Bronze → Silver          (6h, GE-gated)
 │   │   ├── build_gold.py         # Silver → Gold            (6h)
 │   │   ├── train_model.py        # Gold → MLflow run        (daily)
-│   │   ├── shadow_score.py       # Candidate predicts on live (6h)
+│   │   ├── shadow_score.py       # Batch inference on recent reviews (6h) ✓
 │   │   └── evaluate_and_monitor.py  # Evidently drift + promotion gate (6h)
 │   └── plugins/
 ├── api/                          # FastAPI service               (Amelia)
 │   ├── app/
-│   │   ├── main.py
+│   │   ├── main.py               # /health, /predict, /predict/batch, /reload
 │   │   ├── schemas.py
-│   │   ├── model_loader.py       # Loads Production + (optional) Staging
-│   │   └── shadow.py             # Logs Staging predictions alongside Prod
+│   │   ├── model_loader.py       # Delegates to models/inference.load_models()
+│   │   └── shadow.py             # Production + Staging predict; log to Postgres
 │   └── Dockerfile (in infra/docker/api/)
 ├── dashboard/                    # Streamlit                     (Amelia)
 │   ├── app.py
 │   └── pages/                    # KPIs, drift, alerts, digest, model comparison
-├── models/                       # Training code                 (Van + Amelia)
+├── models/                       # Training + inference            (Van + Amelia)
 │   ├── train.py
-│   ├── evaluate.py
+│   ├── evaluate.py               # (planned) offline eval helper
+│   ├── inference.py              # Shared loaders + predict/score API
+│   ├── batch_score.py            # Scheduled batch scorer (+ CLI)
+│   ├── prediction_log.py         # Postgres INSERT helper
 │   ├── baseline_sklearn.py       # Phase 1
 │   ├── distilbert_finetune.py    # Phase 2
 │   └── embeddings.py             # Used by Gold layer
@@ -173,7 +219,7 @@ mle_project/
 │   ├── ingest/                   # SOURCES → BRONZE (raw, source-native + provenance)
 │   │   ├── yelp_loader.py        # Yelp tar → dt= partitions (reviews + business)
 │   │   ├── malaysia_review_loader.py  # Malaysia TripAdvisor → dt= partitions
-│   │   └── replay.py             # Replay simulator (demo_data stable/spike)
+│   │   └── replay.py             # Replay simulator
 │   ├── refine/                   # BRONZE → SILVER (join, clean, dedup); Silver → Gold (labels)
 │   │   ├── build_silver.py       # Bronze → review_date= Silver parquet partitions
 │   │   ├── build_gold.py         # Silver → feature_store + label_store partitions
@@ -208,7 +254,7 @@ mle_project/
 | `minio` + `minio-init` | 9000 / 9001 | default | — |
 | `mlflow` | 5001 (host) → 5000 (container) | default | postgres, minio-init |
 | `airflow-init` / `webserver` / `scheduler` | 8080 | default | postgres |
-| `api` | 8000 | default | mlflow |
+| `api` | 8000 | default | mlflow, postgres |
 | `dashboard` | 8501 | default | api, postgres |
 | `smoke` | — | `smoke` (opt-in) | — |
 
@@ -251,12 +297,13 @@ reviews_gold (
 
 predictions (
   id              BIGSERIAL PRIMARY KEY,
-  review_id       BIGINT REFERENCES reviews_silver(id),
-  model_name      TEXT NOT NULL,
-  model_version   INT NOT NULL,
-  stage           TEXT NOT NULL,         -- 'Production' | 'Staging' (shadow)
-  label           TEXT NOT NULL,         -- 'negative' | 'neutral' | 'positive'
-  score           REAL,                  -- nullable (LinearSVC has no predict_proba)
+  review_id       BIGINT REFERENCES reviews(id),  -- Phase 1 thin-slice table; → reviews_silver in prod
+  text            TEXT NOT NULL,
+  predicted_label TEXT NOT NULL,         -- 'negative' | 'neutral' | 'positive'
+  model_name      TEXT NOT NULL,           -- e.g. sentiment-baseline | sentiment-distilbert
+  model_version   TEXT,                    -- MLflow version string (nullable for pickle fallback)
+  stage           TEXT,                    -- 'Production' | 'Staging' (shadow)
+  score           REAL,                    -- confidence when predict_proba available
   predicted_at    TIMESTAMPTZ DEFAULT now()
 );
 
@@ -281,13 +328,20 @@ human_corrections (
 
 The training DAG joins `reviews_gold` with `human_corrections` and prefers human labels when present — that's how the feedback loop closes. The Gold builder derives `label` from `rating` (`<=2 → negative`, `3 → neutral`, `>=4 → positive`) via `label_from_rating()` in `data/refine/build_gold.py`.
 
-> **Implemented schema (prototype).** The medallion keys on the loaders' natural **string**
-> ids, so the live `reviews_silver` / `reviews_gold` tables (DDL in
-> `infra/docker/postgres/init.sql`, mirrored in `data/storage/warehouse.py`) use
-> `PRIMARY KEY (source, source_id)` and `review_id` (= Silver `source_id`) rather than the
-> `BIGSERIAL` ids sketched above, and **Silver carries no `label`** (labels live only in
-> Gold). `data/publish.py` populates these tables and mirrors the bronze/silver/gold objects
-> to MinIO `s3://datasets/…` from the on-disk medallion (see [data/README.md](../data/README.md#publishing-to-minio--postgres)).
+Online and batch inference both write to `predictions` through `models/prediction_log.py`. The API logs on every `/predict` and `/predict/batch` call when `POSTGRES_*` env vars are set (`LOG_PREDICTIONS=1` by default). The `shadow_score` DAG batch-writes the same shape for reviews ingested within `SHADOW_SCORE_LOOKBACK_HOURS` (default 6).
+
+### Inference env vars (canonical: `infra/.env.example`)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `MODEL_NAME` | `sentiment-baseline` | Production registry name |
+| `MODEL_STAGE` | `Production` | Production registry stage |
+| `SHADOW_MODEL_NAME` | `sentiment-distilbert` | Staging candidate; empty string disables shadow |
+| `SHADOW_MODEL_STAGE` | `Staging` | Staging registry stage |
+| `SHADOW_SCORE_LOOKBACK_HOURS` | `6` | Batch DAG + CLI lookback window |
+| `LOG_PREDICTIONS` | `1` | API writes to `predictions` when Postgres is reachable |
+| `MODEL_PICKLE_PATH` | `models/artifacts/baseline.pkl` | Offline / smoke fallback |
+| `ADMIN_TOKEN` | *(unset)* | Required header for `POST /reload`; unset disables reload |
 
 ---
 

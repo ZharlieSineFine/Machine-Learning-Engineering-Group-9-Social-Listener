@@ -65,10 +65,14 @@ def test_train_logs_run_and_registers_model(tmp_path, mlflow_env):
     # The run exists and has the expected metrics.
     fetched = client.get_run(result.mlflow_run_id)
     for key in (
-        "f1_macro", "f1_weighted", "accuracy",
-        "f1_neg", "precision_neg", "recall_neg",
+        "test_f1_negative", "test_f1_macro",
+        "test_recall_negative", "test_precision_negative",
+        "test_f1_positive", "test_f1_neutral",
     ):
         assert key in fetched.data.metrics
+    assert fetched.data.params["neg_threshold"]
+    assert fetched.data.params["training_data_size"]
+    assert fetched.data.params["class_distribution"]
     assert 0.0 <= fetched.data.metrics["recall_neg"] <= 1.0
     assert fetched.data.params["model_type"] == "tfidf_logreg_baseline"
 

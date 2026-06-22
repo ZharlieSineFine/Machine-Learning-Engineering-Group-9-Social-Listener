@@ -53,10 +53,15 @@ def test_log_to_mlflow_calls_register_with_model_name(monkeypatch):
     mock_mlflow.log_metrics.assert_called_once()
     logged_metrics = mock_mlflow.log_metrics.call_args[0][0]
     for key in (
-        "f1_macro", "f1_weighted", "accuracy",
-        "f1_neg", "precision_neg", "recall_neg",
+        "test_f1_negative", "val_f1_negative",
+        "test_f1_macro", "test_recall_negative", "test_precision_negative",
+        "test_f1_positive", "test_f1_neutral",
     ):
         assert key in logged_metrics
+    mock_mlflow.log_params.assert_called_once()
+    params = mock_mlflow.log_params.call_args[0][0]
+    assert params["neg_threshold"] == metrics["neg_threshold"]
+    assert params["training_data_size"] == metrics["training_data_size"]
     mock_sklearn.log_model.assert_called_once()
     kwargs = mock_sklearn.log_model.call_args.kwargs
     assert kwargs["registered_model_name"] == "sentiment-baseline"

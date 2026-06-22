@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS predictions (
     predicted_label TEXT NOT NULL,
     model_name      TEXT NOT NULL,
     model_version   TEXT,
+    stage           TEXT CHECK (stage IS NULL OR stage IN ('Production', 'Staging')),
+    score           REAL,
     predicted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS predictions_predicted_at_idx ON predictions (predicted_at);

@@ -37,6 +37,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models.baseline_sklearn import train  # noqa: E402
+from models.metrics import mlflow_metrics, mlflow_training_params  # noqa: E402
 
 DEFAULT_DATA = ROOT / "data" / "sample" / "reviews_sample.csv"
 DEFAULT_OUT = ROOT / "models" / "artifacts" / "baseline.pkl"
@@ -83,31 +84,15 @@ def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
     with mlflow.start_run() as run:
         tuned = metrics.get("tuned_params", {})
         mlflow.log_params({
+            **mlflow_training_params(metrics),
             "model_type": "tfidf_logreg_baseline",
-            "n_train": metrics["n_train"],
-            "n_val": metrics.get("n_val", 0),
-            "n_test": metrics["n_test"],
-            "neg_threshold": metrics.get("neg_threshold", ""),
             "tfidf__ngram_range": str(tuned.get("tfidf__ngram_range", "")),
             "tfidf__max_features": tuned.get("tfidf__max_features", ""),
             "clf__C": tuned.get("clf__C", ""),
             "clf__class_weight": str(tuned.get("clf__class_weight", "")),
         })
-        if metrics.get("cutoff_date") is not None:
-            mlflow.log_param("oot_cutoff_date", metrics["cutoff_date"])
 
-        logged_metrics = {
-            "f1_macro": metrics["f1_macro"],
-            "f1_weighted": metrics["f1_weighted"],
-            "accuracy": metrics["accuracy"],
-            "f1_neg": metrics["f1_neg"],
-            "precision_neg": metrics["precision_neg"],
-            "recall_neg": metrics["recall_neg"],
-        }
-        if metrics.get("f1_macro_oot") is not None:
-            logged_metrics["f1_macro_oot"] = metrics["f1_macro_oot"]
-            logged_metrics["f1_weighted_oot"] = metrics["f1_weighted_oot"]
-        mlflow.log_metrics(logged_metrics)
+        mlflow.log_metrics(mlflow_metrics(metrics))
 
         info = mlflow.sklearn.log_model(
             sk_model=pipe,

@@ -24,6 +24,7 @@ Single source of truth for **who does what, in what order, and what "done" looks
 | Training + MLflow logging | Van *(+ Amelia)* | Van | Charlie, Ha | All |
 | Evidently drift + retrain trigger | Charlie, Ha | Charlie | Van, Amelia | All |
 | FastAPI + Registry pull + **shadow deploy** | Amelia | Amelia | Anh, Van | All |
+| Inference (online + batch scoring) | Amelia | Amelia | Van, Charlie, Ha | All |
 | Streamlit dashboard | Amelia | Amelia | Charlie | All |
 | Pytest suite (incl. smoke container) | Amelia (+ each owner for their folder) | Amelia | All | All |
 | Architecture / workflow docs | Anh | Anh | All | All |
@@ -74,7 +75,7 @@ Phase 1 (MVP skeleton)  ──►  Phase 2 (depth)  ──►  Phase 3 (polish +
 
 **Amelia (Serving + UI)**
 - `api/app/main.py` — FastAPI with `POST /predict` loading `models:/sentiment-baseline/Production`
-- `api/app/shadow.py` — stub that logs Production predictions to `predictions` table (real shadow lane in Phase 2)
+- `api/app/shadow.py` — stub that logs Production predictions to `predictions` table *(full dual-lane shadow lands in Phase 2 — see §4)*
 - `dashboard/app.py` — 3 tiles: total reviews, % positive, latest prediction probe
 - Smoke container green: pytest covers happy-path `/predict`
 
@@ -118,18 +119,28 @@ Phase 1 (MVP skeleton)  ──►  Phase 2 (depth)  ──►  Phase 3 (polish +
 - *(Stretch)* Terraform stub for AWS lift (RDS + S3 + ECS)
 
 **Amelia (Serving + UI)**
-- `/predict` supports batch input
-- **Shadow deploy**: when MLflow has a `Staging` version, FastAPI loads it alongside Production, runs both, logs both to `predictions` with `stage` set accordingly. Only Production responses are returned to the caller.
-- `/admin/reload` to refresh registry without restart
+
+*Inference — implemented:*
+- `models/inference.py` — shared loaders (`MLflow` → pickle fallback) + `predict_labels()` / `predict_with_scores()`
+- `models/prediction_log.py` — Postgres INSERT contract for `predictions`
+- `models/batch_score.py` — batch scorer + CLI (`python -m models.batch_score`)
+- `airflow/dags/shadow_score.py` — 6-hour DAG; scores recent `reviews` rows, logs Production + Staging
+- `api/app/shadow.py` — dual-lane predict; returns Production label; logs both lanes to `predictions`
+- `api/app/main.py` — `/predict`, `/predict/batch` wired through shadow; `/reload` refreshes both lanes
+- `tests/test_inference_unit.py`, `tests/test_shadow_unit.py` — unit coverage (no compose required)
+
+*Still to wire (Phase 2 remainder):*
+- `/predict` supports batch input *(done)*; dashboard A/B tile from `predictions` *(pending)*
+- **DistilBERT in API image** — add `torch` + `transformers` to `api/requirements.txt` for live Staging shadow
 - Streamlit: sentiment timeline, word cloud of negative reviews, model A/B comparison (Production vs Staging from `predictions` table), drift report embed
 - `human_corrections` write path: a dashboard tile lets reviewers fix a wrong prediction; row goes to `human_corrections` and next training run picks it up
-- End-to-end pytest hitting the live compose stack
+- End-to-end pytest hitting the live compose stack (`tests/integration/test_shadow_lane.py`)
 
 ### Phase 2 Definition of Done
 - [ ] DistilBERT beats baseline on held-out F1 in MLflow
 - [ ] Drift report runs every 6h and is visible in the dashboard
 - [ ] A poisoned batch (via replay simulator) actually trips the gate and triggers retraining
-- [ ] Shadow lane produces N hours of paired Production/Staging predictions before promotion
+- [x] Shadow lane produces N hours of paired Production/Staging predictions before promotion *(online + batch inference wired; dashboard comparison tile pending)*
 - [ ] A human correction in the dashboard appears in the next training run's label set
 - [ ] Integration test in CI: stack up, ingest, refine, build, train, predict, assert
 
@@ -157,6 +168,9 @@ Phase 1 (MVP skeleton)  ──►  Phase 2 (depth)  ──►  Phase 3 (polish +
 | `reviews_gold` table | Charlie/Ha (with Van for embeddings) → Van | Columns + label derivation from `rating` |
 | MLflow run logging | Van → Charlie/Ha | Metric names (`f1_macro`, `precision_neg`, …), tag conventions |
 | MLflow registered model name | Van → Amelia | `sentiment-baseline` (P1), `sentiment-distilbert` (P2); aliases `Production`, `Staging` |
+| Inference API (online) | Amelia → dashboard, Airflow | `models/inference.py` + `api/app/shadow.py`; Production response, both lanes logged |
+| Batch inference (scheduled) | Amelia → Charlie/Ha | `models/batch_score.py` + `airflow/dags/shadow_score.py`; 6h lookback |
+| `predictions` table | Amelia → dashboard, monitoring | Columns in `infra/docker/postgres/init.sql`; written by `models/prediction_log.py` |
 | FastAPI request/response schema | Amelia → dashboard, downstream | Pydantic models in `api/app/schemas.py` |
 | Evidently report location | Charlie/Ha → Amelia | MinIO path + `monitoring_reports` row |
 | `human_corrections` write path | Amelia → Van | Schema in `data/schemas/`; training DAG reads it next run |
@@ -193,6 +207,11 @@ When a contract changes, the owner opens a PR that updates the contract file *an
 |---|---|
 | Spin up locally | `docker compose up` from repo root |
 | Run smoke tests | `docker compose run --rm smoke` |
+| Run inference unit tests | `pytest tests/test_inference_unit.py tests/test_shadow_unit.py` |
+| Online predict | `POST http://localhost:8000/predict` — see `api/app/schemas.py` |
+| Batch score (manual) | `python -m models.batch_score --lookback-hours 6` |
+| Batch score (scheduled) | Airflow DAG `shadow_score` at `http://localhost:8080` |
+| Reload models (admin) | `POST http://localhost:8000/reload` with `X-Admin-Token` header |
 | Airflow UI | `http://localhost:8080` |
 | MLflow UI | `http://localhost:5001` (host; container port 5000) |
 | FastAPI docs | `http://localhost:8000/docs` |
