@@ -59,7 +59,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      # ${BIND_HOST} defaults to 0.0.0.0 (local). On a shared remote set BIND_HOST=127.0.0.1
+      # and a free ${POSTGRES_HOST_PORT} in .env so this never clashes with another project.
+      - "${BIND_HOST:-0.0.0.0}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -78,8 +80,8 @@ services:
       MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID}
       MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${BIND_HOST:-0.0.0.0}:${MINIO_API_PORT:-9000}:9000"
+      - "${BIND_HOST:-0.0.0.0}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -122,7 +124,7 @@ services:
       # port 5000 by default. Container-internal port stays 5000, so
       # MLFLOW_TRACKING_URI=http://mlflow:5000 still works for services
       # on the docker network.
-      - "5001:5000"
+      - "${BIND_HOST:-0.0.0.0}:${MLFLOW_HOST_PORT:-5001}:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,7 +150,7 @@ services:
     container_name: sentiment-airflow-web
     command: webserver
     ports:
-      - "8080:8080"
+      - "${BIND_HOST:-0.0.0.0}:${AIRFLOW_HOST_PORT:-8080}:8080"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -184,7 +186,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
     ports:
-      - "8000:8000"
+      - "${BIND_HOST:-0.0.0.0}:${API_HOST_PORT:-8000}:8000"
     depends_on:
       mlflow:
         condition: service_started
@@ -207,7 +209,9 @@ services:
       GOLD_ROOT: /repo_data/gold
       DEMO_DATA_ROOT: /repo_data/demo_data
     ports:
-      - "8501:8501"
+      # Behind a reverse proxy on the remote: BIND_HOST=127.0.0.1 + a free
+      # ${DASHBOARD_HOST_PORT}; the proxy forwards to it. Local default = 0.0.0.0:8501.
+      - "${BIND_HOST:-0.0.0.0}:${DASHBOARD_HOST_PORT:-8501}:8501"
     # The marketing dashboard reads the reviews table from Postgres directly; it does
     # not need the API to render. (The MLOps-monitor page calls the API but degrades
     # gracefully when it's down.) Depend on Postgres so the dashboard is independent.
