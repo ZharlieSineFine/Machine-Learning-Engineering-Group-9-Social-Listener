@@ -17,7 +17,7 @@ from app.schemas import (
     PredictResponse,
     ReloadResponse,
 )
-from app.shadow import predict_one_with_shadow, predict_with_shadow
+from app.shadow import postgres_dsn, predict_one_with_shadow, predict_with_shadow
 from models.inference import ModelSet
 
 app = FastAPI(title="Sentiment API", version="0.3.0")
@@ -87,6 +87,51 @@ def predict_batch(req: BatchPredictRequest) -> BatchPredictResponse:
         review_ids=req.review_ids,
     )
     return BatchPredictResponse(labels=labels)
+
+
+@app.get("/shadow/log")
+def shadow_log(limit: int = 500) -> list[dict]:
+    """Paired Production vs Staging predictions for the dashboard shadow panel.
+
+    Reconstructs the pairs from the Postgres ``predictions`` table: each
+    ``/predict`` call writes a Production row and (when a Staging candidate is
+    loaded) a Staging row sharing the same ``text``. Pivots them into
+    ``{text, production_label, staging_label}`` rows — ``staging_label`` is null
+    when no shadow lane was logged. Returns ``[]`` when Postgres is unavailable.
+    """
+    dsn = postgres_dsn()
+    if dsn is None:
+        return []
+    limit = max(1, min(limit, 2000))
+    query = """
+        SELECT text,
+               MAX(predicted_label) FILTER (WHERE stage = 'Production') AS production_label,
+               MAX(predicted_label) FILTER (WHERE stage = 'Staging')    AS staging_label,
+               MAX(predicted_at) AS last_at
+        FROM predictions
+        WHERE stage IS NOT NULL
+        GROUP BY text
+        ORDER BY last_at DESC
+        LIMIT %s
+    """
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query, (limit,))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+    return [
+        {"text": text, "production_label": prod, "staging_label": stag}
+        for text, prod, stag, _ in rows
+        if prod is not None
+    ]
 
 
 @app.post("/reload", response_model=ReloadResponse)

@@ -5,6 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=".venv/Scripts/python.exe"; [ -x "$PY" ] || PY=".venv/bin/python"
 
+# Score the demo with the immutable champion (champion_baseline_v3.pkl), not the
+# baseline.pkl that models/train.py overwrites. Guarded so teammates without the
+# offline champion fall back to baseline.pkl.
+[ -f "models/artifacts/champion_baseline_v3.pkl" ] && \
+  export MODEL_PICKLE_PATH="$PWD/models/artifacts/champion_baseline_v3.pkl"
+
 wait_url() { for _ in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)" = "200" ] && return 0; sleep 2; done; return 1; }
 
 echo "==> [1/6] Starting services (postgres, minio, mlflow, airflow, dashboard)..."

@@ -12,7 +12,7 @@ COPY api/ ./
 # Sklearn pipeline pickles reference models.baseline_sklearn; inference modules
 # are shared with batch scoring.
 COPY models/__init__.py models/baseline_sklearn.py models/inference.py \
-     models/prediction_log.py models/metrics.py ./models/
+     models/prediction_log.py models/metrics.py models/splits.py ./models/
 ENV PYTHONPATH=/app
 
 EXPOSE 8000

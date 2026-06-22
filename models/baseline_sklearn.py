@@ -73,6 +73,21 @@ def build_pipeline(
     return Pipeline([("tfidf", vectorizer), ("clf", classifier)])
 
 
+def _canonical_label(value) -> str:
+    """Map a raw class (int id 0/1/2 or string) to a canonical string label.
+
+    Pipelines trained on integer classes (e.g. the v3 champion) return 0/1/2;
+    without this, ``np.where`` below stringifies them to '0'/'1'/'2' instead of
+    'negative'/'neutral'/'positive'.
+    """
+    if isinstance(value, str):
+        return value
+    try:
+        return LABELS[int(value)]
+    except (ValueError, IndexError, TypeError):
+        return str(value)
+
+
 @dataclass
 class TunedSentimentPipeline:
     """Fitted sklearn pipeline with the tuned negative-class threshold."""
@@ -86,7 +101,7 @@ class TunedSentimentPipeline:
 
     def predict(self, X) -> np.ndarray:
         probs_neg = self._neg_proba(X)
-        base = self.pipeline.predict(X)
+        base = np.array([_canonical_label(b) for b in self.pipeline.predict(X)])
         return np.where(probs_neg >= self.neg_threshold, LABELS[self.neg_idx], base)
 
     def predict_proba(self, X) -> np.ndarray:
@@ -97,7 +112,7 @@ class TunedSentimentPipeline:
     ) -> np.ndarray:
         t = self.neg_threshold if threshold is None else threshold
         probs_neg = self._neg_proba(X)
-        base = self.pipeline.predict(X)
+        base = np.array([_canonical_label(b) for b in self.pipeline.predict(X)])
         return np.where(probs_neg >= t, LABELS[self.neg_idx], base)
 
 

@@ -21,13 +21,18 @@ DEMO_CSV = Path(os.getenv("SHADOW_CSV", str(ROOT / "data" / "demo" / "demo_jun20
 N = int(os.getenv("SHADOW_SAMPLE", "60"))  # API caps batch at 256
 
 
+# The API rejects any text over 1000 chars (api/app/main.py:_validate_text); a few
+# demo reviews exceed that, so truncate to keep the whole batch from 422-ing.
+MAX_TEXT_CHARS = 1000
+
+
 def main() -> int:
     texts: list[str] = []
     with open(DEMO_CSV, encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             t = (row.get("text") or "").strip()
             if t:
-                texts.append(t)
+                texts.append(t[:MAX_TEXT_CHARS])
             if len(texts) >= N:
                 break
     if not texts:
