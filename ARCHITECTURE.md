@@ -229,9 +229,8 @@ mle_project/
 │   ├── expectations/             # Great Expectations suites
 │   ├── schemas/                  # SQL DDL for *_silver, *_gold + Pydantic types
 │   └── sample/                   # Tiny in-repo seed for CI smoke
-├── monitoring/                   # Evidently + retraining trigger (Charlie + Ha)
-│   ├── drift_checks.py
-│   └── retrain_trigger.py        # Emits Airflow trigger when drift > τ
+├── monitoring/                   # Evidently drift monitoring (Charlie + Ha)
+│   └── drift_checks.py           # read-only observer; alerts, no auto-retrain
 ├── infra/                        # Docker, compose, CI            (Anh)
 │   ├── docker/
 │   └── github-actions/

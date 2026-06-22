@@ -5,10 +5,10 @@
 Evidently runs inside Airflow as a Python lib (no standalone service). It lives in
 two places, both backed by `monitoring/drift_checks.py`:
 
-- **`evaluate_and_monitor`** (every 6h) — observational drift on live data; writes
-  a report and, when drift blocks the gate, **triggers a retrain** of
-  `medallion_train_cycle`.
-- **`medallion_train_cycle` → `gate`** task — the promotion gate; runs between
+- **`evaluate_and_monitor`** (every 6h) — observational drift on live data; a
+  read-only observer that writes a report and, when drift blocks the gate,
+  **fires an alert** (no auto-retrain — see below).
+- **`medallion_pipeline` → `gate`** task — the promotion gate; runs between
   `train` and `promote` and **blocks promotion** of a regressed model.
 
 ## What we monitor
@@ -37,12 +37,14 @@ brand sentiment matters most), so it has its own recall guard alongside F1.
 4. Return `blocked_promotion`; `promote` honours it. With `raise_on_block=True`
    the task fails red via `PromotionBlocked`.
 
-## Retrain loop
+## Drift alert (human-in-the-loop)
 
-`evaluate_and_monitor` ends with `should_retrain` (a `ShortCircuitOperator` reading
-the drift result) → `trigger_retrain` (a `TriggerDagRunOperator` firing
-`medallion_train_cycle`). So scheduled drift detection on live data automatically
-kicks off a fresh ingest→train→gate→promote cycle.
+`evaluate_and_monitor` is a read-only observer: it ends with `should_alert` (a
+`ShortCircuitOperator` reading the drift result) → `send_alert`. On a blocked gate
+it writes the `monitoring_reports` row and surfaces the alert in the Airflow logs.
+There is **no** automatic retrain — a human reviews the dashboard and, if
+warranted, retrains off-cycle by triggering `medallion_pipeline` with
+`FORCE_TRAIN=1`.
 
 ## Outputs
 

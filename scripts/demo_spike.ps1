@@ -3,10 +3,11 @@
 #
 #   .\scripts\demo_spike.ps1
 #
-# What happens (all under ~1 min):
+# What happens (under a minute):
 #   1. The champion model scores today's review burst -> reviews table (negative % jumps).
-#   2. Airflow's evaluate_and_monitor detects drift, blocks the gate, flags the report,
-#      and triggers the medallion_train_cycle retrain DAG.
+#   2. Airflow's evaluate_and_monitor observes the drift, blocks the gate, records the
+#      monitoring_reports row, and fires send_alert. NO auto-retrain - a human reviews
+#      the alert and runs medallion_pipeline with FORCE_TRAIN=1 only if warranted.
 #   3. The dashboard's latest batch turns red and the spike alert fires.
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)   # repo root
@@ -29,17 +30,17 @@ Write-Host "==> [1/2] Inference: scoring today's review burst with the champion 
 & $py -m serving.batch_infer --scenario spike --asof $SPIKE_DAY --n-recent 1 --as-now --clear-today
 
 Write-Host ""
-Write-Host "==> [2/2] Airflow: evaluate_and_monitor detecting drift (Evidently)..." -ForegroundColor Cyan
+Write-Host "==> [2/2] Airflow: evaluate_and_monitor observes the drift + records the alert (no auto-retrain)..." -ForegroundColor Cyan
 docker exec -e DRIFT_REPLAY_SCENARIO=spike -e DRIFT_REPLAY_ASOF=$SPIKE_DAY -e DRIFT_REPLAY_N_RECENT=1 `
-  sentiment-airflow-scheduler airflow tasks test evaluate_and_monitor compute_and_log_drift $ds 2>&1 |
+  sentiment-airflow-scheduler airflow tasks test evaluate_and_monitor drift_check $ds 2>&1 |
   Select-String -Pattern "replay-drift:spike|drift_score=|blocked=True|evaluate_and_monitor\]"
 
 Write-Host ""
-Write-Host "    Drift blocked the gate -> triggering retrain (medallion_train_cycle)..." -ForegroundColor Cyan
-docker exec sentiment-airflow-scheduler airflow dags trigger medallion_train_cycle 2>&1 |
-  Select-String -Pattern "queued|created|medallion_train_cycle"
+Write-Host "    Gate BLOCKED -> alert recorded in monitoring_reports (the dashboard shows it)." -ForegroundColor Yellow
+Write-Host "    No model is retrained automatically - a human reviews the alert and runs" -ForegroundColor Yellow
+Write-Host "    medallion_pipeline with FORCE_TRAIN=1 only if warranted." -ForegroundColor Yellow
 
 Write-Host ""
-Write-Host "DONE. The dashboard now shows the spike + the red alert banner." -ForegroundColor Green
-Write-Host "  Dashboard : http://localhost:8501   (negative % jumps, alert fires)" -ForegroundColor Green
-Write-Host "  Airflow   : http://localhost:8080   (medallion_train_cycle now has a fresh run)"
+Write-Host "DONE. Drift detected -> team ALERTED. No model was retrained automatically." -ForegroundColor Green
+Write-Host "  Dashboard : http://localhost:8501   (negative % jumps; MLOps Monitor -> 'Gate blocked')" -ForegroundColor Green
+Write-Host "  Off-cycle retrain only if a human decides: FORCE_TRAIN=1 on medallion_pipeline."

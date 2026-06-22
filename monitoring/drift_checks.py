@@ -18,7 +18,7 @@ Two layers live here, sharing one Evidently code path:
        * recall on the ``negative`` class drops > recall_neg_drop_threshold.
 
    Upload + DB insert happen **before** any raise, so a blocking report stays
-   discoverable in the dashboard. Used by ``medallion_train_cycle`` between
+   discoverable in the dashboard. Used by ``medallion_pipeline`` between
    ``train`` and ``promote``.
 
 Runnable three ways, like ``models/train.py``: from an Airflow PythonOperator,

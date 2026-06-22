@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS monitoring_reports (
     report_url         TEXT NOT NULL,  -- s3://monitoring/...
     drift_score        REAL,
     blocked_promotion  BOOLEAN NOT NULL DEFAULT FALSE,
-    triggered_retrain  BOOLEAN NOT NULL DEFAULT FALSE,  -- set by monitoring/retrain_trigger.py when a retrain is kicked
+    triggered_retrain  BOOLEAN NOT NULL DEFAULT FALSE,  -- legacy/unused: auto-retrain was removed (evaluate_and_monitor now alerts only); kept to avoid migrating existing volumes
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS monitoring_reports_run_date_idx ON monitoring_reports (run_date DESC);

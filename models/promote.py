@@ -9,7 +9,7 @@ run doesn't ship.
 Owner: Van (Modeler).
 
 NOTE: ported into the ``data_loader`` branch during the Airflow integration so
-``medallion_train_cycle`` runs end-to-end. Coordinate the eventual merge with
+``medallion_pipeline`` runs end-to-end. Coordinate the eventual merge with
 Van, who owns ``models/``.
 """
 from __future__ import annotations
