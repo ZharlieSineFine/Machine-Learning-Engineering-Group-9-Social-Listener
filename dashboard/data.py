@@ -85,6 +85,23 @@ _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']{2,}")  # 3+ letter words
 
 # ---------- review data ----------
 
+def load_reviews_via_api(api_url: str, days: int = 14, timeout: int = 5) -> pd.DataFrame:
+    """Fetch recent reviews from the serving API (`GET /reviews`).
+
+    The Marketing dashboard's primary data path: the API owns DB access, so the
+    dashboard needs no Postgres credentials for the business view. Raises on
+    transport/HTTP error so the caller can fall back to local files.
+    """
+    import requests
+
+    r = requests.get(f"{api_url}/reviews", params={"days": days}, timeout=timeout)
+    r.raise_for_status()
+    df = pd.DataFrame(r.json(), columns=["text", "label", "source", "review_date"])
+    if "review_date" in df.columns:
+        df["review_date"] = pd.to_datetime(df["review_date"], errors="coerce")
+    return df
+
+
 def load_reviews(
     dsn: Optional[str] = None,
     gold_root: Optional[Path] = None,

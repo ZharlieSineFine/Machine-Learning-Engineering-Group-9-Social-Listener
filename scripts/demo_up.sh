@@ -5,11 +5,27 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=".venv/Scripts/python.exe"; [ -x "$PY" ] || PY=".venv/bin/python"
 
-# Score the demo with the immutable champion (champion_baseline_v3.pkl), not the
-# baseline.pkl that models/train.py overwrites. Guarded so teammates without the
-# offline champion fall back to baseline.pkl.
-[ -f "models/artifacts/champion_baseline_v3.pkl" ] && \
-  export MODEL_PICKLE_PATH="$PWD/models/artifacts/champion_baseline_v3.pkl"
+# Pre-demo check: the champion model is distributed offline (gitignored) — see
+# models/artifacts/champion_manifest.txt. With it, the demo scores from the immutable
+# champion; without it, it silently falls back to baseline.pkl (a weak re-run that
+# models/train.py overwrites), so warn loudly rather than show off numbers.
+CHAMPION="models/artifacts/champion_baseline_v3.pkl"
+if [ -f "$CHAMPION" ]; then
+  export MODEL_PICKLE_PATH="$PWD/$CHAMPION"
+  echo "==> [check] champion model found -> $CHAMPION"
+else
+  echo "============================================================"
+  echo "  WARNING: champion model NOT found:"
+  echo "    $CHAMPION"
+  echo "  The demo will FALL BACK to models/artifacts/baseline.pkl,"
+  echo "  a weak re-run (~0.59 F1) — demo numbers will be OFF."
+  echo "  Pull champion_baseline_v3.pkl from the team Drive/USB into"
+  echo "  models/artifacts/  (see models/artifacts/champion_manifest.txt)."
+  echo "============================================================"
+  # Continue anyway: the fallback keeps the stack runnable. Set
+  # REQUIRE_CHAMPION=1 to hard-stop here instead.
+  [ "${REQUIRE_CHAMPION:-0}" = "1" ] && { echo "REQUIRE_CHAMPION=1 set -> aborting."; exit 1; }
+fi
 
 wait_url() { for _ in $(seq 1 40); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)" = "200" ] && return 0; sleep 2; done; return 1; }
 

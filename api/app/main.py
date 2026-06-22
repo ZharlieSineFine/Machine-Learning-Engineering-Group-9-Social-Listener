@@ -134,6 +134,40 @@ def shadow_log(limit: int = 500) -> list[dict]:
     ]
 
 
+@app.get("/reviews")
+def reviews(days: int = 14) -> list[dict]:
+    """Recent reviews for the dashboard's Marketing page (timeline/KPIs/alerts/word cloud).
+
+    Returns ``{text, label, source, review_date}`` for rows ingested in the last
+    ``days``. The Marketing dashboard reads operational data through this endpoint
+    instead of hitting Postgres directly — the serving API owns DB access. Returns
+    ``[]`` when Postgres is unavailable.
+    """
+    dsn = postgres_dsn()
+    if dsn is None:
+        return []
+    days = max(1, min(days, 365))
+    query = (
+        "SELECT text, label, source, ingested_at AS review_date "
+        "FROM reviews WHERE ingested_at >= NOW() - (INTERVAL '1 day' * %s) "
+        "ORDER BY ingested_at"
+    )
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query, (days,))
+                cols = [c.name for c in cur.description]
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    return [dict(zip(cols, r)) for r in rows]  # datetimes -> ISO via FastAPI encoder
+
+
 @app.post("/reload", response_model=ReloadResponse)
 def reload_model(x_admin_token: str | None = Header(default=None)) -> ReloadResponse:
     """Admin: re-pull models from MLflow without restarting the container."""

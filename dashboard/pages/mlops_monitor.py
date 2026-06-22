@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -37,20 +36,18 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[2]   # repo root when file is at dashboard/pages/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# dashboard/ dir on path so `import theme` (dashboard/theme.py) resolves from pages/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import theme  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants — palette matches the marketing dashboard exactly
 # ---------------------------------------------------------------------------
-TEAL      = "#1D9E75"
-RED       = "#E24B4A"
-AMBER     = "#EF9F27"
-BROWN     = "#5C3A21"
-CARD_BG   = "#1E2128"
-PAGE_BG   = "#16181D"
-BORDER    = "#2E3039"
-TEXT_PRI  = "#E8E6DF"
-TEXT_SEC  = "#888780"
-BLUE      = "#4A90D9"   # extra accent for "shadow" badge
+# Colours are CSS-variable aliases (theme.py) so the light/dark toggle re-themes
+# all the HTML below; Plotly is gone from this page (shadow uses HTML bars now).
+from theme import (  # noqa: E402
+    AMBER, BLUE, BORDER, BROWN, CARD2, CARD_BG, FAINT, PAGE_BG, RED, TEAL, TEXT_PRI, TEXT_SEC,
+)
 
 API_URL   = os.getenv("API_URL", "http://localhost:8000")
 DRIFT_THRESHOLD = float(os.getenv("DRIFT_THRESHOLD", "0.3"))
@@ -65,39 +62,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown(f"""
-<style>
-.stApp {{ background-color: {PAGE_BG}; }}
-.block-container {{ padding: 1.5rem 2rem 2rem; max-width: 100%; }}
-#MainMenu, footer, header {{ visibility: hidden; }}
-
-[data-testid="stMetric"] {{
-    background: {CARD_BG};
-    border: 1px solid {BORDER};
-    border-radius: 10px;
-    padding: 1rem 1.2rem;
-}}
-[data-testid="stMetricLabel"] p {{
-    color: {TEXT_SEC} !important;
-    font-size: 11px !important;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-}}
-[data-testid="stMetricValue"] {{
-    color: {TEXT_PRI} !important;
-    font-size: 1.8rem !important;
-    font-weight: 600 !important;
-}}
-[data-testid="stMetricDelta"] {{ font-size: 11px !important; }}
-
-hr {{ border-color: {BORDER} !important; margin: 0.5rem 0; }}
-
-.stDataFrame {{ background: {CARD_BG} !important; }}
-
-p, li, span {{ color: {TEXT_PRI}; }}
-h1, h2, h3  {{ color: {TEXT_PRI} !important; }}
-</style>
-""", unsafe_allow_html=True)
+# Base styling + fonts + active light/dark palette are injected by theme.inject()
+# in main(); this page only renders custom HTML that references the CSS variables.
 
 # ---------------------------------------------------------------------------
 # Shared HTML helpers  (same style as app.py)
@@ -330,37 +296,6 @@ def _fetch_api_health() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def render_nav(active: str = "mlops") -> None:
-    """Top navigation bar — shared between marketing and MLOps pages."""
-    marketing_style = (
-        f"background:{TEAL};color:#fff;"
-        if active == "marketing"
-        else f"background:transparent;color:{TEXT_SEC};border:1px solid {BORDER};"
-    )
-    mlops_style = (
-        f"background:{TEAL};color:#fff;"
-        if active == "mlops"
-        else f"background:transparent;color:{TEXT_SEC};border:1px solid {BORDER};"
-    )
-    st.markdown(
-        f"""<div style="display:flex;gap:8px;margin-bottom:12px;">
-            <span style="font-size:11px;color:{TEXT_SEC};
-                         align-self:center;margin-right:4px;
-                         text-transform:uppercase;letter-spacing:0.05em;">View</span>
-            <a href="/" target="_self"
-               style="text-decoration:none;padding:5px 16px;border-radius:8px;
-                      font-size:12px;font-weight:600;{marketing_style}">
-               🍃 Marketing
-            </a>
-            <a href="/mlops_monitor" target="_self"
-               style="text-decoration:none;padding:5px 16px;border-radius:8px;
-                      font-size:12px;font-weight:600;{mlops_style}">
-               🔬 MLOps Monitor
-            </a>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
 def render_header() -> None:
     health = _fetch_api_health()
     api_ok = health.get("status") == "ok"
@@ -388,9 +323,9 @@ def render_header() -> None:
             unsafe_allow_html=True,
         )
     with right:
-        color  = "#6FCF6F" if api_ok else "#F09595"
-        bg     = "#162414" if api_ok else "#2E1A1A"
-        border = "#2A5C2A" if api_ok else "#6B2222"
+        color  = "var(--good-fg)" if api_ok else "var(--bad-fg)"
+        bg     = "var(--good-bg)" if api_ok else "var(--bad-bg)"
+        border = "var(--good-bd)" if api_ok else "var(--bad-bd)"
         label  = "✓ &nbsp;API healthy" if api_ok else "⚠ &nbsp;API unreachable"
         st.markdown(
             f"""<div style="margin-top:8px;padding:7px 14px;background:{bg};
@@ -417,19 +352,28 @@ def render_prod_model_kpis(runs_df: pd.DataFrame) -> None:
     model_lbl = prod_row["model"] if prod_row is not None else "—"
     run_lbl   = prod_row["run_name"] if prod_row is not None else "—"
 
-    html = f"""
-    {inner}
-    <p style="margin:0 0 0.6rem;font-size:13px;color:{TEXT_SEC};">
-        <span style="color:{TEXT_PRI};font-weight:600;">{model_lbl}</span>
-        &nbsp;·&nbsp; run: <code style="color:{AMBER};font-size:11px;">{run_lbl}</code>
-    </p>
-    """
-    _card(html)
+    def _subtile(label: str, value: str, color: str | None = None) -> str:
+        vc = f"color:{color};" if color else ""
+        return (
+            f'<div style="background:{CARD2};border:1px solid {BORDER};border-radius:10px;padding:16px 18px;">'
+            f'<div style="font-size:10.5px;color:{TEXT_SEC};text-transform:uppercase;letter-spacing:.07em;'
+            f'font-weight:600;">{label}</div>'
+            f'<div style="font-family:\'Space Grotesk\';font-size:30px;font-weight:600;margin-top:8px;'
+            f'font-variant-numeric:tabular-nums;{vc}">{value}</div></div>'
+        )
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("F1 macro",        f1_macro)
-    c2.metric("F1 negative",     f1_neg)
-    c3.metric("Recall negative", recall)
+    html = (
+        f"{inner}"
+        f'<p style="margin:0 0 0.6rem;font-size:13px;color:{TEXT_SEC};">'
+        f'<span style="color:{TEXT_PRI};font-weight:600;font-size:15px;">{model_lbl}</span>'
+        f'&nbsp;·&nbsp; run <code style="font-family:\'Spline Sans Mono\';color:{AMBER};font-size:12px;">{run_lbl}</code></p>'
+        f'<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px;">'
+        + _subtile("F1 macro", f1_macro)
+        + _subtile("F1 negative", f1_neg, AMBER)
+        + _subtile("Recall negative", recall, TEAL)
+        + "</div>"
+    )
+    _card(html)
 
 
 def render_mlflow_run_history(runs_df: pd.DataFrame) -> None:
@@ -442,10 +386,11 @@ def render_mlflow_run_history(runs_df: pd.DataFrame) -> None:
         return
 
     STATUS_COLOR = {
-        "production": (TEAL,  "#0D2E21"),
-        "staging":    (BLUE,  "#111E2E"),
-        "failed":     (RED,   "#2E1111"),
-        "archived":   (TEXT_SEC, CARD_BG),
+        "production": (TEAL,  "var(--teal-soft)"),
+        "staging":    (BLUE,  "var(--blue-soft)"),
+        "failed":     (RED,   "var(--red-soft)"),
+        "archived":   (TEXT_SEC, "var(--card2)"),
+        "baseline":   (TEXT_SEC, "var(--card2)"),
     }
 
     rows_html = ""
@@ -458,10 +403,12 @@ def render_mlflow_run_history(runs_df: pd.DataFrame) -> None:
         f1n = f"{r['f1_neg']:.2f}"      if pd.notna(r.get("f1_neg"))    else "—"
         rec = f"{r['recall_neg']:.2f}"  if pd.notna(r.get("recall_neg")) else "—"
 
+        row_bg = "var(--row-hl)" if status == "production" else "transparent"
         rows_html += f"""
-        <tr style="border-bottom:1px solid {BORDER};">
-            <td style="padding:8px 6px;color:{TEXT_SEC};font-family:monospace;
-                       font-size:11px;">{r['run_id']}</td>
+        <tr style="border-bottom:1px solid {BORDER};background:{row_bg};">
+            <td style="padding:10px 6px;color:{TEXT_SEC};font-family:'Spline Sans Mono';
+                       font-size:11.5px;">{r['run_id']}</td>"""
+        rows_html += f"""
             <td style="padding:8px 6px;color:{TEXT_PRI};font-size:12px;">{r['model']}</td>
             <td style="padding:8px 6px;color:{TEXT_SEC};font-size:11px;">{r.get('run_name','')}</td>
             <td style="padding:8px 6px;color:{TEXT_PRI};font-size:12px;text-align:right;">{f1m}</td>
@@ -523,56 +470,49 @@ def render_shadow_panel() -> None:
     )
     agree_pct = agree / n_shadow * 100
 
-    # Per-class breakdown
+    # Per-class breakdown as HTML horizontal bars (matches the design; themes via CSS vars).
     prod_counts = pd.Series([e["production_label"] for e in shadow_entries]).value_counts()
     stag_counts = pd.Series([e["staging_label"]    for e in shadow_entries]).value_counts()
     labels = ["positive", "neutral", "negative"]
+    mx = max([int(prod_counts.get(l, 0)) for l in labels]
+             + [int(stag_counts.get(l, 0)) for l in labels] + [1])
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        name="Production",
-        x=labels,
-        y=[prod_counts.get(l, 0) for l in labels],
-        marker_color=TEAL,
-    ))
-    fig.add_trace(go.Bar(
-        name="Staging",
-        x=labels,
-        y=[stag_counts.get(l, 0) for l in labels],
-        marker_color=AMBER,
-        opacity=0.8,
-    ))
-    fig.update_layout(
-        barmode="group",
-        height=220,
-        margin=dict(l=0, r=0, t=4, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=TEXT_SEC, size=11),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-            font=dict(color=TEXT_SEC, size=11), bgcolor="rgba(0,0,0,0)",
-        ),
-        xaxis=dict(showgrid=False, color=TEXT_SEC),
-        yaxis=dict(gridcolor=BORDER, color=TEXT_SEC),
-    )
+    def _bar(count: int, color: str) -> str:
+        return (
+            f'<div style="display:flex;align-items:center;gap:10px;">'
+            f'<div style="height:13px;border-radius:4px;background:{color};'
+            f'width:{count / mx * 100:.1f}%;min-width:2px;"></div>'
+            f'<span style="font-size:11px;color:{TEXT_SEC};min-width:28px;'
+            f'font-variant-numeric:tabular-nums;">{count}</span></div>'
+        )
+
+    groups = ""
+    for lbl in labels:
+        groups += (
+            f'<div><div style="font-size:11.5px;color:{TEXT_PRI};margin-bottom:6px;'
+            f'text-transform:capitalize;">{lbl}</div>'
+            f'<div style="display:flex;flex-direction:column;gap:5px;">'
+            + _bar(int(prod_counts.get(lbl, 0)), TEAL)
+            + _bar(int(stag_counts.get(lbl, 0)), AMBER)
+            + "</div></div>"
+        )
 
     agree_color = TEAL if agree_pct >= 80 else (AMBER if agree_pct >= 60 else RED)
-    summary_html = f"""
-    {inner}
-    <p style="margin:0 0 0.8rem;font-size:12px;color:{TEXT_SEC};">
-        {n_shadow} shadow predictions &nbsp;·&nbsp;
-        agreement rate:
-        <span style="color:{agree_color};font-weight:600;">{agree_pct:.1f}%</span>
-    </p>
-    """
-    st.markdown(
-        f'<div style="background:{CARD_BG};border:1px solid {BORDER};'
-        f'border-radius:10px;padding:1rem 1.2rem;">{summary_html}',
-        unsafe_allow_html=True,
+    legend = (
+        f'<div style="display:flex;gap:18px;margin-bottom:14px;font-size:11.5px;color:{TEXT_SEC};">'
+        f'<span style="display:flex;align-items:center;gap:6px;"><span style="width:11px;height:11px;'
+        f'border-radius:3px;background:{TEAL};"></span>Production</span>'
+        f'<span style="display:flex;align-items:center;gap:6px;"><span style="width:11px;height:11px;'
+        f'border-radius:3px;background:{AMBER};"></span>Staging</span></div>'
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    st.markdown("</div>", unsafe_allow_html=True)
+    _card(
+        inner
+        + f'<div style="font-size:12.5px;color:{TEXT_SEC};margin-bottom:16px;">{n_shadow} '
+          f'shadow predictions&nbsp; ·&nbsp; agreement rate '
+          f'<span style="color:{agree_color};font-weight:600;">{agree_pct:.1f}%</span></div>'
+        + legend
+        + f'<div style="display:flex;flex-direction:column;gap:16px;">{groups}</div>'
+    )
 
 
 def render_drift_panel() -> None:
@@ -591,7 +531,7 @@ def render_drift_panel() -> None:
     # Gate status badge. "Blocked" matches the promotion-gate / alert semantics:
     # a blocked gate is exactly what evaluate_and_monitor alerts on.
     gate_color  = TEAL if gate_ok else RED
-    gate_bg     = "#0D2E21" if gate_ok else "#2E1111"
+    gate_bg     = "var(--teal-soft)" if gate_ok else "var(--red-soft)"
     gate_label  = "Gate passed" if gate_ok else "Gate blocked"
     gate_badge  = _badge(gate_label, gate_color, gate_bg)
 
@@ -656,7 +596,8 @@ def render_drift_panel() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    render_nav(active="mlops")
+    theme.inject(theme.active_theme())
+    theme.topbar(active="mlops")
     render_header()
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
