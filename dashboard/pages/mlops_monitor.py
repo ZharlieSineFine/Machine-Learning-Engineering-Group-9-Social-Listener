@@ -265,6 +265,43 @@ def _fetch_drift() -> Optional[dict]:
         return None
 
 
+def _drift_history(dsn: str, days: int = 21) -> list[tuple]:
+    """Drift trend: one point per day, ascending by date. Latest row wins per day
+    so today's spike row beats today's clean reset row."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_date, drift_score, blocked_promotion FROM ("
+                "  SELECT DISTINCT ON (run_date) run_date, drift_score, blocked_promotion "
+                "  FROM monitoring_reports WHERE report_type = 'data_drift' "
+                "  ORDER BY run_date DESC, created_at DESC LIMIT %s"
+                ") t ORDER BY run_date ASC",
+                (days,),
+            )
+            return [
+                (str(d), float(s) if s is not None else 0.0, bool(b))
+                for d, s, b in cur.fetchall()
+            ]
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=30)
+def _fetch_drift_history() -> list[tuple]:
+    """Recent daily drift_score history for the sparkline ([] when unavailable)."""
+    dsn = _pg_dsn()
+    if not dsn:
+        return []
+    try:
+        return _drift_history(dsn)
+    except Exception as exc:
+        print(f"[mlops_monitor] drift history read failed ({exc})")
+        return []
+
+
 @st.cache_data(ttl=30)
 def _fetch_api_health() -> dict:
     try:
@@ -500,8 +537,41 @@ def render_shadow_panel() -> None:
     )
 
 
+def _sparkline_svg(points: list, *, w: int = 320, h: int = 64, pad: int = 8) -> str:
+    """Inline SVG line chart of drift_score over time. ``points`` is
+    ``[(date, score, blocked), ...]`` ascending. Threshold drawn as a dashed guide;
+    points over the threshold (or blocked) are red. All one SVG, themed via CSS vars."""
+    if len(points) < 2:
+        return ""
+    scores = [p[1] for p in points]
+    ymax = max(0.5, max(scores) * 1.1)      # headroom; label PSI sits well under 1
+    n, iw, ih = len(points), w - 2 * pad, h - 2 * pad
+
+    def xy(i: int, s: float) -> tuple:
+        return pad + iw * i / (n - 1), pad + ih * (1 - min(s, ymax) / ymax)
+
+    pts  = [xy(i, s) for i, s in enumerate(scores)]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area = f"{pad},{h - pad} " + line + f" {w - pad},{h - pad}"
+    _, ty = xy(0, DRIFT_THRESHOLD)
+    dots = "".join(
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.6" '
+        f'fill="{RED if (points[i][2] or scores[i] >= DRIFT_THRESHOLD) else TEAL}"/>'
+        for i, (x, y) in enumerate(pts)
+    )
+    return (
+        f'<svg viewBox="0 0 {w} {h}" width="100%" height="{h}" preserveAspectRatio="none" '
+        f'style="display:block;overflow:visible;margin-top:4px;">'
+        f'<polyline points="{area}" fill="{TEAL}" fill-opacity="0.08" stroke="none"/>'
+        f'<line x1="{pad}" y1="{ty:.1f}" x2="{w - pad}" y2="{ty:.1f}" stroke="{AMBER}" '
+        f'stroke-width="1" stroke-dasharray="4 3" opacity="0.7"/>'
+        f'<polyline points="{line}" fill="none" stroke="{TEAL}" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>{dots}</svg>'
+    )
+
+
 def render_drift_panel() -> None:
-    inner  = _section_title("📡", "Evidently drift scores")
+    inner  = _section_title("📡", "Sentiment drift (label PSI)")
     result = _fetch_drift()
 
     if not result or "drift_score" not in result:
@@ -522,8 +592,9 @@ def render_drift_panel() -> None:
     gate_label  = "Gate passed" if gate_ok else "Gate blocked"
     gate_badge  = _badge(gate_label, gate_color, gate_bg)
 
-    score_bar_pct = min(drift_score * 100 / 0.5, 100)   # 0.5 = visual max
-    bar_color = TEAL if drift_score < 0.15 else (AMBER if drift_score < DRIFT_THRESHOLD else RED)
+    bar_color = TEAL if drift_score < 0.1 else (AMBER if drift_score < DRIFT_THRESHOLD else RED)
+    history   = _fetch_drift_history()
+    spark     = _sparkline_svg(history)
 
     # Provenance line: a recorded monitor run vs the live Evidently fallback.
     if mode == "recorded":
@@ -548,27 +619,32 @@ def render_drift_panel() -> None:
             + '</p>'
         )
 
+    if spark:
+        trend = (
+            spark
+            + f'<p style="margin:4px 0 0;font-size:11px;color:{TEXT_SEC};">'
+            f'{len(history)}-day trend &nbsp;·&nbsp; dashed = threshold {DRIFT_THRESHOLD}'
+            f' &nbsp;·&nbsp; PSI ≲0.1 stable · 0.1–0.25 moderate · &gt;0.25 significant</p>'
+        )
+    else:
+        trend = (
+            f'<p style="margin:4px 0 0;font-size:11px;color:{TEXT_SEC};">'
+            f'threshold {DRIFT_THRESHOLD} — trend appears once a few daily points land.</p>'
+        )
+
     html = f"""
     {inner}
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:10px;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;">
         <div>
             <p style="margin:0;font-size:11px;color:{TEXT_SEC};text-transform:uppercase;
-                      letter-spacing:0.05em;">Drift score</p>
+                      letter-spacing:0.05em;">Label PSI</p>
             <p style="margin:2px 0 0;font-size:2rem;font-weight:700;color:{bar_color};">
                 {drift_score:.3f}
             </p>
-            <p style="margin:0;font-size:11px;color:{TEXT_SEC};">
-                threshold {DRIFT_THRESHOLD}
-            </p>
-        </div>
-        <div style="flex:1;">
-            <div style="height:8px;background:{BORDER};border-radius:99px;overflow:hidden;">
-                <div style="height:100%;width:{score_bar_pct:.1f}%;
-                            background:{bar_color};border-radius:99px;"></div>
-            </div>
         </div>
         <div>{gate_badge}</div>
     </div>
+    {trend}
     {meta}
     """
     _card(html)

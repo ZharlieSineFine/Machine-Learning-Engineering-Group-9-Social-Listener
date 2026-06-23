@@ -41,13 +41,23 @@ Write-Host "==> [5/6] Generating replay + scoring a clean 2-week history -> revi
 & $py -m data.ingest.replay --scenario stable | Out-Null
 & $py -m data.ingest.replay --scenario spike  | Out-Null
 & $py -m serving.batch_infer --scenario stable --shift-to-today --truncate
-# Reset the drift signal to a clean baseline on a fresh bring-up. We REPLACE the
-# rows with a single drift_score=0 row rather than just TRUNCATE-ing: the dashboard
-# reads the newest monitoring_reports row, and when the table is EMPTY its panel
-# falls back to a live `import monitoring` check that the dashboard container can't
-# satisfy (no monitoring mount / PYTHONPATH) -> "No module named monitoring". A
-# baseline row keeps the panel in "recorded" mode showing 0.000 / Gate passed.
-$resetSql = "TRUNCATE monitoring_reports; INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion) VALUES (CURRENT_DATE, 'data_drift', 'baseline clean day (demo_up reset)', 0, false);"
+# Reset the drift signal on a fresh bring-up. We REPLACE the rows rather than just
+# TRUNCATE-ing: the dashboard reads monitoring_reports, and when the table is EMPTY
+# its panel falls back to a live `import monitoring` check the dashboard container
+# can't satisfy (no monitoring mount / PYTHONPATH) -> "No module named monitoring".
+# We seed ~2 weeks of low-PSI rows so the drift sparkline has a steady baseline for
+# the spike (demo_spike) to stand against, then a clean 0 for today. Units are label
+# PSI (what evaluate_and_monitor now records) — NOT the old share-of-drifted-columns.
+$resetSql = @"
+TRUNCATE monitoring_reports;
+INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion)
+SELECT d::date, 'data_drift', 'baseline backfill (demo seed)',
+       round((0.003 + random()*0.025)::numeric, 4), false
+FROM generate_series(CURRENT_DATE - INTERVAL '13 days',
+                     CURRENT_DATE - INTERVAL '1 day', INTERVAL '1 day') AS d;
+INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion)
+VALUES (CURRENT_DATE, 'data_drift', 'baseline clean day (demo_up reset)', 0, false);
+"@
 docker exec sentiment-postgres psql -U mlops -d sentiment -c $resetSql | Out-Null
 
 Write-Host "==> [6/6] Seeding the shadow-deploy log (API /predict/batch)..." -ForegroundColor Cyan

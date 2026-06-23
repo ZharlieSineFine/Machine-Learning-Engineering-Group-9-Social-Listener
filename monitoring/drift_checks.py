@@ -31,6 +31,7 @@ Owner: Charlie + Ha (Monitoring).
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -571,11 +572,32 @@ class MonitorResult:
     target_drift: bool = False
     prediction_drift_score: Optional[float] = None
     prediction_drift: bool = False
+    label_psi: float = 0.0              # continuous magnitude of the label shift
     blocked: bool = False
     n_reference: int = 0
     n_current: int = 0
     used_model: bool = False
     evidently_ran: bool = False
+
+
+def population_stability_index(
+    reference: pd.Series, current: pd.Series, eps: float = 1e-6
+) -> float:
+    """PSI of a categorical distribution (``current`` vs ``reference``).
+
+    Unlike ``share_of_drifted_columns`` (a 0/0.25/.../1.0 fraction that's binary
+    when only one column is monitored), PSI is **continuous and monotonic in the
+    size of the shift** — so a 50% negative spike reads differently from a 90%
+    one. Textbook bands: ≲0.1 stable, 0.1–0.25 moderate, >0.25 significant.
+    """
+    ref_p = reference.dropna().value_counts(normalize=True)
+    cur_p = current.dropna().value_counts(normalize=True)
+    psi = 0.0
+    for c in set(ref_p.index) | set(cur_p.index):
+        r = max(float(ref_p.get(c, 0.0)), eps)
+        k = max(float(cur_p.get(c, 0.0)), eps)
+        psi += (k - r) * math.log(k / r)
+    return float(psi)
 
 
 def compute_drift_report(
@@ -649,6 +671,7 @@ def compute_drift_report(
         "target_drift": False,
         "prediction_drift_score": None,
         "prediction_drift": False,
+        "label_psi": 0.0,
         "used_model": has_pred,
     }
     for m in payload.get("metrics", []):
@@ -674,6 +697,12 @@ def compute_drift_report(
                     float(score) if score is not None else None
                 )
                 out["prediction_drift"] = detected
+
+    # Continuous magnitude for the dashboard trend: how far the label distribution
+    # moved, not just whether it tripped a flag. Computed from the same frames the
+    # report saw, so it lines up with target_drift above.
+    if has_target:
+        out["label_psi"] = population_stability_index(ref[TARGET_COL], cur[TARGET_COL])
 
     import tempfile
 
@@ -764,6 +793,7 @@ def run_monitor_drift(
             target_drift=rpt["target_drift"],
             prediction_drift_score=rpt["prediction_drift_score"],
             prediction_drift=rpt["prediction_drift"],
+            label_psi=rpt["label_psi"],
             blocked=blocked,
             n_reference=len(reference),
             n_current=len(current),
@@ -923,6 +953,7 @@ def run_replay_monitor(
             target_drift=rpt["target_drift"],
             prediction_drift_score=rpt["prediction_drift_score"],
             prediction_drift=rpt["prediction_drift"],
+            label_psi=rpt["label_psi"],
             blocked=blocked,
             n_reference=len(reference),
             n_current=len(current),

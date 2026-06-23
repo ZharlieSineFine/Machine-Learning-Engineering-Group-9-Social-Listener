@@ -29,13 +29,24 @@ echo "==> [5/6] Generating replay + scoring a clean 2-week history -> reviews ta
 "$PY" -m data.ingest.replay --scenario stable >/dev/null
 "$PY" -m data.ingest.replay --scenario spike  >/dev/null
 "$PY" -m serving.batch_infer --scenario stable --shift-to-today --truncate
-# Reset the drift signal to a clean baseline on a fresh bring-up. We REPLACE the
-# rows with a single drift_score=0 row rather than just TRUNCATE-ing: the dashboard
-# reads the newest monitoring_reports row, and when the table is EMPTY its panel
-# falls back to a live `import monitoring` check that the dashboard container can't
-# satisfy (no monitoring mount / PYTHONPATH) -> "No module named monitoring". A
-# baseline row keeps the panel in "recorded" mode showing 0.000 / Gate passed.
-docker exec sentiment-postgres psql -U mlops -d sentiment -c "TRUNCATE monitoring_reports; INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion) VALUES (CURRENT_DATE, 'data_drift', 'baseline clean day (demo_up reset)', 0, false);" >/dev/null
+# Reset the drift signal on a fresh bring-up. We REPLACE the rows rather than just
+# TRUNCATE-ing: the dashboard reads monitoring_reports, and when the table is EMPTY
+# its panel falls back to a live `import monitoring` check the dashboard container
+# can't satisfy (no monitoring mount / PYTHONPATH) -> "No module named monitoring".
+# We seed ~2 weeks of low-PSI rows so the drift sparkline has a steady baseline for
+# the spike (demo_spike) to stand against, then a clean 0 for today. Units are label
+# PSI (what evaluate_and_monitor now records) — NOT the old share-of-drifted-columns.
+read -r -d '' RESET_SQL <<'SQL' || true
+TRUNCATE monitoring_reports;
+INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion)
+SELECT d::date, 'data_drift', 'baseline backfill (demo seed)',
+       round((0.003 + random()*0.025)::numeric, 4), false
+FROM generate_series(CURRENT_DATE - INTERVAL '13 days',
+                     CURRENT_DATE - INTERVAL '1 day', INTERVAL '1 day') AS d;
+INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion)
+VALUES (CURRENT_DATE, 'data_drift', 'baseline clean day (demo_up reset)', 0, false);
+SQL
+docker exec sentiment-postgres psql -U mlops -d sentiment -c "$RESET_SQL" >/dev/null
 
 echo "==> [6/6] Seeding the shadow-deploy log (API /predict/batch)..."
 if wait_url http://localhost:8000/health; then "$PY" scripts/seed_shadow.py; else echo "    (API not ready; skipping shadow seed)"; fi

@@ -48,6 +48,24 @@ dex python -m data.ingest.replay --scenario stable >/dev/null
 dex python -m data.ingest.replay --scenario spike  >/dev/null
 dex python -m serving.batch_infer --scenario stable --shift-to-today --truncate
 
+# Reset the drift signal (mirrors demo_up.sh): seed ~2 weeks of low-PSI rows so the
+# drift sparkline has a steady baseline for the spike to stand against, then a clean
+# 0 for today. REPLACE (not TRUNCATE-only) so the dashboard panel doesn't fall back
+# to a live `import monitoring` check it can't satisfy. Units are label PSI (what
+# evaluate_and_monitor now records).
+read -r -d '' RESET_SQL <<'SQL' || true
+TRUNCATE monitoring_reports;
+INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion)
+SELECT d::date, 'data_drift', 'baseline backfill (demo seed)',
+       round((0.003 + random()*0.025)::numeric, 4), false
+FROM generate_series(CURRENT_DATE - INTERVAL '13 days',
+                     CURRENT_DATE - INTERVAL '1 day', INTERVAL '1 day') AS d;
+INSERT INTO monitoring_reports (run_date, report_type, report_url, drift_score, blocked_promotion)
+VALUES (CURRENT_DATE, 'data_drift', 'baseline clean day (demo_up reset)', 0, false);
+SQL
+docker exec sentiment-postgres psql -U "${POSTGRES_USER:-mlops}" -d "${POSTGRES_DB:-sentiment}" \
+  -c "$RESET_SQL" >/dev/null
+
 echo "==> [4/4] Seeding the shadow-deploy log (API /predict/batch, in-network)..."
 docker exec -e API_URL=http://api:8000 "$SCHED" python /opt/project/scripts/seed_shadow.py || \
   echo "    (API not ready; skipping shadow seed)"

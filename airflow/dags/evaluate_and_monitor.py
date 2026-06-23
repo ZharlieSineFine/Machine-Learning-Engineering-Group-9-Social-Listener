@@ -115,7 +115,11 @@ def _task_drift(**context) -> dict:
             asof=os.getenv("DRIFT_REPLAY_ASOF") or None,
             n_recent=int(n_recent) if n_recent else None,
         )
-        drift_score, blocked = mon.data_drift_score, mon.blocked
+        # Store the continuous label PSI as the headline magnitude (not the binary
+        # share_of_drifted_columns — the replay report monitors only `label`, so the
+        # share is 0/1 and can't show spike severity). `blocked` still comes from the
+        # Evidently drift flags, so the gate decision is unchanged.
+        drift_score, blocked = mon.label_psi, mon.blocked
         report_path, evidently_ran = mon.report_path, mon.evidently_ran
         n_ref, n_cur = mon.n_reference, mon.n_current
         source = f"replay:{scenario}"
