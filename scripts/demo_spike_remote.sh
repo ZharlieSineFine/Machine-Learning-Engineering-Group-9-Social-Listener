@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 
 SCHED="sentiment-airflow-scheduler"
 SPIKE_DAY="${SPIKE_DAY:-2026-06-21}"           # spike day baked into demo_jun2026_spike.csv
-DS="$(date +%Y-%m-%d)"                          # Airflow logical date for the drift task
+DS="$(date -u +%Y-%m-%d)"                       # UTC logical date — matches reviews' UTC ingested_at (no +tz day-skew)
 CHAMPION_CTR="/opt/project/models/artifacts/champion_baseline_v3.pkl"
 [ -f "models/artifacts/champion_baseline_v3.pkl" ] && MPP="$CHAMPION_CTR" || MPP="/opt/project/models/artifacts/baseline.pkl"
 

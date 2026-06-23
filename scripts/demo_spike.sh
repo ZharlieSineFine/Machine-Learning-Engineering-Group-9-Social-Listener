@@ -10,7 +10,7 @@ PY=".venv/Scripts/python.exe"; [ -x "$PY" ] || PY=".venv/bin/python"
   export MODEL_PICKLE_PATH="$PWD/models/artifacts/champion_baseline_v3.pkl"
 
 SPIKE_DAY="2026-06-21"                       # spike day baked into demo_jun2026_spike.csv
-DS="$(date +%Y-%m-%d)"                       # Airflow logical date for the drift task
+DS="$(date -u +%Y-%m-%d)"                    # UTC logical date — matches reviews' UTC ingested_at (no +tz day-skew)
 export POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=mlops POSTGRES_PASSWORD=mlops POSTGRES_DB=sentiment
 
 echo "================================================================"
