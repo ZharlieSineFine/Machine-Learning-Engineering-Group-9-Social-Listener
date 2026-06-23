@@ -31,6 +31,11 @@ else
   [ "${REQUIRE_CHAMPION:-0}" = "1" ] && { echo "REQUIRE_CHAMPION=1 -> aborting."; exit 1; }
 fi
 
+# The in-container airflow user must be able to write the bind-mounted data/ +
+# monitoring/ dirs (replay output, drift reports). After an rsync deploy these keep
+# the sender's ownership, so widen perms or the in-container steps hit Permission denied.
+chmod -R a+rwX data monitoring 2>/dev/null || true
+
 echo "==> [1/4] Waiting for Postgres, MLflow, Airflow..."
 for _ in $(seq 1 60); do docker exec sentiment-postgres pg_isready -U "${POSTGRES_USER:-mlops}" >/dev/null 2>&1 && break; sleep 2; done
 for _ in $(seq 1 60); do docker exec "$SCHED" airflow version >/dev/null 2>&1 && break; sleep 2; done

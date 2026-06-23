@@ -247,36 +247,22 @@ def _recorded_drift(dsn: str) -> Optional[dict]:
 
 @st.cache_data(ttl=30)   # short TTL so the spike alert shows within seconds during the demo
 def _fetch_drift() -> Optional[dict]:
-    """Drift signal for the panel.
+    """Drift signal for the panel — the latest ``monitoring_reports`` row that the
+    ``evaluate_and_monitor`` DAG wrote (so the dashboard reflects what actually fired
+    the alert, including the demo spike).
 
-    Source of truth is the latest ``monitoring_reports`` row the ``evaluate_and_monitor``
-    DAG wrote — so the dashboard reflects what actually fired the alert (including the
-    demo spike), not a recomputed value. Falls back to a live Evidently check only when
-    no monitor run has landed yet (fresh DB).
+    Returns ``None`` when no monitor run has landed yet — the panel then shows a clean
+    "no drift recorded" placeholder. The dashboard intentionally does NOT run Evidently
+    itself (the ``monitoring`` package isn't shipped in this image); it reads the store.
     """
     dsn = _pg_dsn()
-    if dsn:
-        try:
-            rep = _recorded_drift(dsn)
-            if rep:
-                return rep
-        except Exception as exc:
-            print(f"[mlops_monitor] monitoring_reports read failed ({exc}); live fallback")
-
+    if not dsn:
+        return None
     try:
-        from monitoring.drift_checks import run_drift_check
-        result = run_drift_check()
-        return {
-            "mode": "live",
-            "drift_score":       result.drift_score,
-            "n_drifted_columns": result.n_drifted_columns,
-            "dataset_drift":     result.dataset_drift,
-            "passed_gate":       result.passed_gate,
-            "evidently_ran":     result.evidently_ran,
-            "n_reference":       result.n_reference,
-        }
+        return _recorded_drift(dsn)   # dict, or None when the table is empty
     except Exception as exc:
-        return {"error": str(exc)}
+        print(f"[mlops_monitor] monitoring_reports read failed ({exc})")
+        return None
 
 
 @st.cache_data(ttl=30)
@@ -518,9 +504,11 @@ def render_drift_panel() -> None:
     inner  = _section_title("📡", "Evidently drift scores")
     result = _fetch_drift()
 
-    if result is None or "error" in result:
-        err = result.get("error", "unknown") if result else "unknown"
-        _card(inner + _todo_placeholder(f"Drift check failed: {err}"))
+    if not result or "drift_score" not in result:
+        _card(inner + _todo_placeholder(
+            "No drift run recorded yet — trigger the evaluate_and_monitor DAG "
+            "(or run the spike demo) to record a drift score."
+        ))
         return
 
     drift_score = result["drift_score"]
