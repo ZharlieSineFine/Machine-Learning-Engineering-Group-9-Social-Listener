@@ -1,11 +1,11 @@
-"""Airflow DAG — the build pipeline: data every 6h + a weekly model retrain.
+"""Airflow DAG — the build pipeline: data every 6h + an on-demand model retrain.
 
-Runs every 6h and builds the medallion; the train→promote branch is gated to one
-run per week:
+Runs every 6h and builds the medallion; the train→promote branch is
+human-triggered (it stays short-circuited on the scheduled runs):
 
     dep_check → bronze → silver → ge_gate → gold → publish
                                     │
-                                    └─ (weekend?) → train → gate → promote → reload_api
+                                    └─ (FORCE_TRAIN=1?) → train → gate → promote → reload_api
                                                                       └──────┴─► completed
 
 This consolidates the old ``run_daily_medallion`` (data) and
@@ -15,12 +15,12 @@ read-only observer, kept separate so an Evidently hiccup pages as a *monitoring*
 failure, not a pipeline failure. The heavy DistilBERT challenger likewise stays in
 ``shadow_deploy_distilbert`` (deps that aren't in the Airflow image).
 
-Design choice — **data every 6h, model weekly.** The data layers refresh on every
-run; the train→promote branch is short-circuited except on the Sunday 00:00 run
-(or when ``FORCE_TRAIN=1`` is set, for demos/off-cycle drift response/tests). One
-retrain/week is plenty for the review volume, and the cheap logreg baseline could
-go faster if needed. There is no auto-retrain on drift: ``evaluate_and_monitor``
-alerts a human, who triggers this DAG with ``FORCE_TRAIN=1`` if warranted.
+Design choice — **data + inference every 6h, retrain on demand.** The data layers
+refresh on every run; the train→promote branch is short-circuited unless a human
+sets ``FORCE_TRAIN=1`` (off-cycle drift response / demos / tests). The model is
+**not** retrained on a schedule: ``evaluate_and_monitor`` detects drift and alerts
+a human, who triggers this DAG with ``FORCE_TRAIN=1`` if a retrain is warranted.
+Inference itself runs every 6h in the separate ``batch_inference`` DAG.
 
 Every task body is a thin wrapper around the same pure functions the CLIs/tests
 use (``data.run_daily`` / ``data.refine`` / ``monitoring.drift_checks`` /
@@ -43,9 +43,16 @@ if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from airflow import DAG
+from airflow.datasets import Dataset
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.utils.trigger_rule import TriggerRule
+
+# Declarative data dependency: the ``publish`` task updates this Dataset on success,
+# which data-triggers the ``batch_inference`` DAG (same URI there). This couples the
+# build to serving via the *data*, not an imperative cross-DAG trigger — so inference
+# scores what was just built while staying a separate, isolated DAG.
+REVIEWS_GOLD_DATASET = Dataset("postgres://app/reviews_gold")
 
 from data.ingest.ingest_reviews import DEFAULT_SILVER_RECENT_YEARS
 from data.refine.build_gold import process_review_dates
@@ -175,23 +182,16 @@ def _task_publish(**context) -> dict:
 # model branch: (weekend?) → train → gate → promote → reload_api
 # ---------------------------------------------------------------------------
 def _should_train(**context) -> bool:
-    """ShortCircuit: gate the train→promote branch to one run per week.
+    """ShortCircuit: the train→promote branch is human-triggered only.
 
-    Data refreshes every 6h, but the model retrains weekly — on the Sunday 00:00
-    run. ``FORCE_TRAIN=1`` overrides for demos, off-cycle drift response, or tests.
+    Data + inference refresh every 6h, but the model is **not** retrained on a
+    schedule. The branch stays short-circuited unless ``FORCE_TRAIN=1`` is set — a
+    human triggers this DAG that way for an off-cycle retrain (e.g. in response to a
+    drift alert from ``evaluate_and_monitor``), a demo, or a test.
     """
-    if os.getenv("FORCE_TRAIN") == "1":
-        print("[pipeline.should_train] FORCE_TRAIN=1 -> training this run")
-        return True
-    logical = context["logical_date"]
-    # weekday(): Mon=0 .. Sun=6. Runs fire at 00/06/12/18; hour<6 keeps it to the
-    # single midnight run so we train once, not four times, on Sunday.
-    is_weekly_slot = logical.weekday() == 6 and logical.hour < 6
-    print(
-        f"[pipeline.should_train] {logical.isoformat()} weekday={logical.weekday()} "
-        f"hour={logical.hour} -> train={is_weekly_slot}"
-    )
-    return is_weekly_slot
+    forced = os.getenv("FORCE_TRAIN") == "1"
+    print(f"[pipeline.should_train] FORCE_TRAIN={'1' if forced else '0'} -> train={forced}")
+    return forced
 
 
 def _task_train(**_context) -> dict:
@@ -329,7 +329,7 @@ def _task_reload_api(**context) -> None:
 
 with DAG(
     dag_id="medallion_pipeline",
-    description="6h data refresh (bronze→silver→GE→gold→publish) + weekly train→gate→promote→reload",
+    description="6h data refresh (bronze→silver→GE→gold→publish) + on-demand (FORCE_TRAIN=1) train→gate→promote→reload",
     start_date=datetime(2025, 1, 1),
     schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
     catchup=False,
@@ -346,9 +346,14 @@ with DAG(
     silver = PythonOperator(task_id="silver", python_callable=_task_silver)
     ge_gate = PythonOperator(task_id="ge_gate", python_callable=_task_ge_gate)
     gold = PythonOperator(task_id="gold", python_callable=_task_gold)
-    publish = PythonOperator(task_id="publish", python_callable=_task_publish)
+    # outlets: emit the dataset event on success -> data-triggers batch_inference.
+    publish = PythonOperator(
+        task_id="publish",
+        python_callable=_task_publish,
+        outlets=[REVIEWS_GOLD_DATASET],
+    )
 
-    # --- model branch (weekly: Sunday 00:00, or FORCE_TRAIN=1) ---
+    # --- model branch (human-triggered: FORCE_TRAIN=1 only) ---
     should_train = ShortCircuitOperator(
         task_id="should_train",
         python_callable=_should_train,
@@ -369,7 +374,7 @@ with DAG(
     # data spine
     dep_check_source_data >> bronze >> silver >> ge_gate >> gold >> publish
 
-    # model branch fans out from gold (weekly: trains on the data just built)
+    # model branch fans out from gold (on FORCE_TRAIN=1: trains on the data just built)
     gold >> should_train >> train >> gate >> promote >> reload_api
 
     # single terminal node the whole graph converges on

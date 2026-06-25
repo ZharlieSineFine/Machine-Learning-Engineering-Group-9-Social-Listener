@@ -1,9 +1,17 @@
-"""Batch inference — score replay reviews with the champion model and write the
-predictions into the Postgres ``reviews`` table the dashboard reads.
+"""Batch inference — score reviews with the champion model and write the predictions
+into the Postgres ``reviews`` table the dashboard reads.
 
-This is the inference step of the demo loop:
+Two entry points share the same scoring + write logic:
 
-    replay window (text)  ->  champion model  ->  predicted label  ->  reviews table  ->  dashboard
+  * :func:`run_on_silver` — **production**. Scores the medallion's freshly-built
+    silver window (the ``batch_inference`` DAG calls this, Dataset-triggered after
+    the medallion publishes).
+  * :func:`run` — **offline demo / tests**. Scores a replay window from the replay
+    simulator. Kept for the demo scripts + unit tests.
+
+The inference step, either way:
+
+    reviews (text)  ->  champion model  ->  predicted label  ->  reviews table  ->  dashboard
 
 The champion (``models/artifacts/baseline.pkl``, TF-IDF + LogReg) was trained on
 integer classes (0=negative, 1=neutral, 2=positive). We map those back to the
@@ -57,6 +65,14 @@ DEFAULT_PICKLE = Path(
 )
 DEFAULT_NEG_THRESHOLD = float(os.getenv("NEG_THRESHOLD", "0.46"))
 REPLAY_SOURCE = "replay"
+
+# Production path: score the medallion's freshly-built silver instead of a replay
+# folder. ``BATCH_SOURCE`` tags those rows in ``reviews.source``; the window size is
+# how many recent ``review_date=`` partitions to score per run (default 1 = the day
+# the medallion just built).
+BATCH_SOURCE = "batch"
+SILVER_ROOT = _REPO_ROOT / "data" / "silver" / "reviews"
+DEFAULT_SILVER_PARTITIONS = int(os.getenv("BATCH_INFER_SILVER_PARTITIONS", "1"))
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +248,65 @@ def run(
     }
     print(
         f"[batch_infer:{scenario}] wrote {n} rows -> reviews | "
+        f"predicted negative={neg_pct}% | dist={dist}"
+    )
+    return summary
+
+
+def run_on_silver(
+    *,
+    n_partitions: int = DEFAULT_SILVER_PARTITIONS,
+    as_now: bool = True,
+    clear_today: bool = True,
+    neg_threshold: float = DEFAULT_NEG_THRESHOLD,
+    pickle_path: Path = DEFAULT_PICKLE,
+    silver_root: Optional[Path] = None,
+    pg: Optional[PostgresConfig] = None,
+) -> dict:
+    """Production batch inference — score the medallion's freshly-built silver window.
+
+    Reads the most recent ``n_partitions`` ``review_date=`` silver partitions (the
+    real reviews the medallion just ingested), scores them with the champion model,
+    and writes the predictions into the ``reviews`` table the dashboard reads. This is
+    the production read-side step; it replaces the replay-driven :func:`run`, which
+    stays for the offline demo + tests.
+
+    Mirrors :func:`run`'s write semantics: ``clear_today`` refreshes only the most
+    recent day and ``as_now`` stamps the rows "now", so multi-day history is preserved
+    while today's batch is rescored. Returns the same summary shape.
+    """
+    pg = pg or PostgresConfig.from_env()
+    if pg is None:
+        raise RuntimeError("Postgres not configured — set POSTGRES_* env vars")
+
+    # _load_recent_silver is the same helper the medallion gate + drift monitor use.
+    from monitoring.drift_checks import _load_recent_silver
+
+    silver_root = silver_root or SILVER_ROOT
+    df = _load_recent_silver(silver_root, n_partitions)
+    if df is None or df.empty:
+        print(f"[batch_infer:silver] no silver partitions under {silver_root}; nothing to score")
+        return {"source": "silver", "rows_written": 0, "predicted_dist": {}, "negative_pct": 0.0, "as_now": as_now}
+
+    pipe = load_model(pickle_path)
+    labels = predict_labels(pipe, list(df["text"]), neg_threshold=neg_threshold)
+
+    dist = pd.Series(labels).value_counts().to_dict()
+    with connection(pg) as conn:
+        if clear_today:
+            clear_recent_reviews(conn, days=1)
+        n = write_reviews(conn, df, labels, as_now=as_now, source=BATCH_SOURCE)
+
+    neg_pct = round(100 * labels.count("negative") / max(1, len(labels)), 1)
+    summary = {
+        "source": "silver",
+        "rows_written": n,
+        "predicted_dist": dist,
+        "negative_pct": neg_pct,
+        "as_now": as_now,
+    }
+    print(
+        f"[batch_infer:silver] wrote {n} rows -> reviews | "
         f"predicted negative={neg_pct}% | dist={dist}"
     )
     return summary
