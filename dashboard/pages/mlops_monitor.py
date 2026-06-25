@@ -53,7 +53,9 @@ TEXT_SEC  = "#888780"
 BLUE      = "#4A90D9"   # extra accent for "shadow" badge
 
 API_URL   = os.getenv("API_URL", "http://localhost:8000")
-DRIFT_THRESHOLD = float(os.getenv("DRIFT_THRESHOLD", "0.3"))
+# Drift is gated per-column on PSI; the gauge colour follows the gate decision and
+# the number shown is the share of drifted columns (a magnitude, not the gate).
+DRIFT_PSI_THRESHOLD = float(os.getenv("DRIFT_PSI_THRESHOLD", "0.25"))
 
 # ---------------------------------------------------------------------------
 # Page config + CSS
@@ -596,7 +598,14 @@ def render_drift_panel() -> None:
     gate_badge  = _badge(gate_label, gate_color, gate_bg)
 
     score_bar_pct = min(drift_score * 100 / 0.5, 100)   # 0.5 = visual max
-    bar_color = TEAL if drift_score < 0.15 else (AMBER if drift_score < DRIFT_THRESHOLD else RED)
+    # Colour tracks the actual per-column PSI gate (blocked == red), not the legacy
+    # share threshold; the share is just a magnitude shown on the bar.
+    if not gate_ok:
+        bar_color = RED
+    elif drift_score >= 0.15:
+        bar_color = AMBER
+    else:
+        bar_color = TEAL
 
     # Provenance line: a recorded monitor run vs the live Evidently fallback.
     if mode == "recorded":
@@ -626,12 +635,12 @@ def render_drift_panel() -> None:
     <div style="display:flex;align-items:center;gap:16px;margin-bottom:10px;">
         <div>
             <p style="margin:0;font-size:11px;color:{TEXT_SEC};text-transform:uppercase;
-                      letter-spacing:0.05em;">Drift score</p>
+                      letter-spacing:0.05em;">Drift share</p>
             <p style="margin:2px 0 0;font-size:2rem;font-weight:700;color:{bar_color};">
                 {drift_score:.3f}
             </p>
             <p style="margin:0;font-size:11px;color:{TEXT_SEC};">
-                threshold {DRIFT_THRESHOLD}
+                gate: PSI &gt; {DRIFT_PSI_THRESHOLD} per column
             </p>
         </div>
         <div style="flex:1;">

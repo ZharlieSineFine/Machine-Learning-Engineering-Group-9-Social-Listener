@@ -14,9 +14,11 @@ Kept separate from the build pipeline on purpose:
   * **Pure observation** — read-only, its own 6h cadence, no dependency on the
     producing DAG having just run.
 
-Default source is the observational silver window (``run_drift_check``). Set
-``DRIFT_REPLAY_SCENARIO=spike`` (with optional ``DRIFT_REPLAY_ASOF`` /
-``DRIFT_REPLAY_N_RECENT``) to drive the gate from the replay simulator — the demo
+Default source is the observational silver window (``run_monitor_drift``), which
+observes data, target (label) **and** prediction drift; the champion model is
+loaded best-effort so prediction drift is added when available (label drift needs
+no model). Set ``DRIFT_REPLAY_SCENARIO=spike`` (with optional ``DRIFT_REPLAY_ASOF``
+/ ``DRIFT_REPLAY_N_RECENT``) to drive the gate from the replay simulator — the demo
 path where the negative-review spike trips the gate.
 
 Owner: Charlie + Ha (Monitoring).
@@ -95,16 +97,37 @@ def _record_report(
         conn.close()
 
 
+def _load_champion_best_effort():
+    """Load the champion pipeline for prediction drift, or None on any failure.
+
+    The monitor must stay green even when the artifact is missing, so prediction
+    drift is best-effort: without a model we still get data + label drift.
+    """
+    try:
+        from serving.batch_infer import load_model
+
+        return load_model()
+    except Exception as exc:  # missing pickle / import error — degrade, don't fail
+        print(
+            f"[evaluate_and_monitor] champion model unavailable, "
+            f"prediction drift skipped ({exc})"
+        )
+        return None
+
+
 def _task_drift(**context) -> dict:
     """Run the Evidently drift check, persist the report + a monitoring_reports row.
 
-    Default source is the observational silver window. Set ``DRIFT_REPLAY_SCENARIO``
+    Observes **data, target (label) and prediction** drift over the recent silver
+    window via ``run_monitor_drift``; the champion model is loaded best-effort to
+    add prediction drift (label drift needs no model). Set ``DRIFT_REPLAY_SCENARIO``
     (stable|spike) to drive the gate from the replay simulator instead — the demo
     path where the spike trips the gate. Optional ``DRIFT_REPLAY_ASOF`` /
     ``DRIFT_REPLAY_N_RECENT`` select the current window.
     """
     run_date = context["ds"]  # YYYY-MM-DD logical date
 
+    model = _load_champion_best_effort()
     scenario = os.getenv("DRIFT_REPLAY_SCENARIO")
     if scenario:
         from monitoring.drift_checks import run_replay_monitor
@@ -114,31 +137,38 @@ def _task_drift(**context) -> dict:
             scenario,
             asof=os.getenv("DRIFT_REPLAY_ASOF") or None,
             n_recent=int(n_recent) if n_recent else None,
+            model=model,
         )
-        drift_score, blocked = mon.data_drift_score, mon.blocked
-        report_path, evidently_ran = mon.report_path, mon.evidently_ran
-        n_ref, n_cur = mon.n_reference, mon.n_current
         source = f"replay:{scenario}"
     else:
-        from monitoring.drift_checks import run_drift_check
+        from monitoring.drift_checks import run_monitor_drift
 
-        result = run_drift_check()
-        drift_score, blocked = result.drift_score, (not result.passed_gate)
-        report_path, evidently_ran = result.report_path, result.evidently_ran
-        n_ref, n_cur = result.n_reference, result.n_current
+        mon = run_monitor_drift(model=model)
         source = "silver"
+
+    # Both branches return a MonitorResult — map uniformly.
+    drift_score, blocked = mon.data_drift_score, mon.blocked
+    report_path, evidently_ran = mon.report_path, mon.evidently_ran
+    n_ref, n_cur = mon.n_reference, mon.n_current
 
     report_url = _upload_report(_minio_client(), Path(report_path), run_date)
     _record_report(_app_dsn(), run_date, report_url, drift_score, blocked)
 
     print(
         f"[evaluate_and_monitor] {run_date} ({source}): drift_score={drift_score:.3f} "
-        f"blocked={blocked} evidently_ran={evidently_ran} -> {report_url}"
+        f"target_drift={mon.target_drift} prediction_drift={mon.prediction_drift} "
+        f"blocked={blocked} evidently_ran={evidently_ran} used_model={mon.used_model} "
+        f"-> {report_url}"
     )
     return {
         "drift_score": drift_score,
+        "target_drift": mon.target_drift,
+        "target_drift_score": mon.target_drift_score,
+        "prediction_drift": mon.prediction_drift,
+        "prediction_drift_score": mon.prediction_drift_score,
         "blocked": blocked,
         "evidently_ran": evidently_ran,
+        "used_model": mon.used_model,
         "n_reference": n_ref,
         "n_current": n_cur,
         "report_url": report_url,

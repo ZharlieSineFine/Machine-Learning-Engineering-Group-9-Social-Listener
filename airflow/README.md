@@ -18,8 +18,13 @@ Airflow runs four DAGs that move data through the pipeline. The Airflow containe
 
 - Airflow webserver: `http://localhost:8080` (default user `airflow` / `airflow`, change in `.env`)
 - DAGs auto-load from `airflow/dags/` — no restart needed after edit
-- Use the `BashOperator` to call `models/train.py` so training code stays portable
 - Heavy lifts (transformer fine-tuning) should be `KubernetesPodOperator` in cloud, but `PythonOperator` is fine locally
 
-## Phase 1 stub
-Create minimal DAGs that just print + write a dummy row so the wiring is testable before any real ingestion code lands.
+## Task pattern
+Every task is a thin `PythonOperator` wrapper around the same pure functions the
+CLIs and tests use (`data.run_daily` / `data.refine` / `monitoring.drift_checks` /
+`models.*` / `serving.batch_infer`) — nothing is reimplemented in a DAG. Heavy or
+optional imports (boto3, psycopg2, torch, evidently) are deferred into the task
+callables so DAG parsing stays light and a missing optional dep can't break the
+scheduler. Infra helpers (MinIO/Postgres) are env-gated and degrade to no-ops when
+unset, so the DAGs stay green in environments without that infra.
