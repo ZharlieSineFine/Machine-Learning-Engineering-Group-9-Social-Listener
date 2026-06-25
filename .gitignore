@@ -131,3 +131,7 @@ docker-compose.*.local.yml
 .pytype/
 .benchmarks/
 .cursor/plans/docker_data_pipeline_3a738118.plan.md
+
+# ---------- Local scratch reports (not for git) ----------
+report.md
+handoff_context.md

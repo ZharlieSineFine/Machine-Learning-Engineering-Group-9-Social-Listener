@@ -13,9 +13,14 @@ Two layers live here, sharing one Evidently code path:
    recall), uploads the HTML report to MinIO, writes a pointer row to
    ``monitoring_reports``, and blocks promotion when EITHER:
 
-       * drift_score >= drift_threshold, OR
+       * any monitored column drifts (per-column PSI > psi_threshold), OR
        * f1_macro drops > f1_drop_threshold, OR
        * recall on the ``negative`` class drops > recall_neg_drop_threshold.
+
+Drift detection is **pure per-column**: every monitored column gets its own PSI
+(Population Stability Index) test, and a single drifted column is enough to flag
+drift. ``drift_score`` still carries Evidently's share-of-drifted-columns for the
+dashboard gauge, but it no longer drives the decision.
 
    Upload + DB insert happen **before** any raise, so a blocking report stays
    discoverable in the dashboard. Used by ``medallion_pipeline`` between
@@ -89,7 +94,13 @@ CATEGORICAL_COLS = ["source"]
 TARGET_COL = "label"
 NEG_LABEL = "negative"
 
-# Share of monitored columns that must drift to block promotion (README: "> 0.3").
+# Per-column PSI threshold: a column is flagged drifted when its Population
+# Stability Index exceeds this. 0.25 is the classic "significant population shift"
+# band (<0.1 stable, 0.1-0.25 moderate, >0.25 significant). Applied to BOTH the
+# feature columns (data drift) and the target/prediction columns (label drift).
+DEFAULT_PSI_THRESHOLD = float(os.getenv("DRIFT_PSI_THRESHOLD", "0.25"))
+# Legacy share-of-drifted-columns threshold. No longer drives the gate (drift is
+# pure per-column now), but kept for the dashboard gauge band + back-compat.
 DEFAULT_DRIFT_THRESHOLD = float(os.getenv("DRIFT_THRESHOLD", "0.3"))
 # F1-macro drop that blocks promotion (ARCHITECTURE/WORKFLOW: "> 3%").
 DEFAULT_F1_DROP_THRESHOLD = float(os.getenv("DRIFT_F1_DROP_THRESHOLD", "0.03"))
@@ -134,7 +145,11 @@ class DriftResult:
     evidently_ran: bool = False         # False if we fell back to the no-op stub
 
     def is_blocking(self, threshold: float = DEFAULT_DRIFT_THRESHOLD) -> bool:
-        return self.drift_score >= threshold
+        # Pure per-column: ANY monitored column flagged by the per-column PSI test
+        # (PSI > DRIFT_PSI_THRESHOLD) blocks. ``threshold`` (the legacy
+        # share-of-columns gate) is accepted for signature compatibility but no
+        # longer drives the decision; ``drift_score`` still carries the share.
+        return self.n_drifted_columns >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +243,15 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
     ref = reference_df[monitored]
     cur = current_df[monitored]
 
-    metrics = [DataDriftPreset()]
+    # Per-column PSI for every monitored column (features here; the target is
+    # added below when present), threshold 0.25 = "significant shift".
+    metrics = [
+        DataDriftPreset(stattest="psi", stattest_threshold=DEFAULT_PSI_THRESHOLD)
+    ]
     if TARGET_COL in monitored:
-        metrics.append(TargetDriftPreset())
+        metrics.append(
+            TargetDriftPreset(stattest="psi", stattest_threshold=DEFAULT_PSI_THRESHOLD)
+        )
 
     report = Report(metrics=metrics)
     report.run(
@@ -395,7 +416,9 @@ def evaluate(
         reasons = []
         if drift_blocks:
             reasons.append(
-                f"drift_score={drift.drift_score:.3f} >= {drift_threshold:.3f}"
+                f"{drift.n_drifted_columns} column(s) drifted by PSI > "
+                f"{DEFAULT_PSI_THRESHOLD:.2f} (drift_score={drift.drift_score:.3f}, "
+                f"cols={drift.drifted_columns})"
             )
         if f1_blocks:
             reasons.append(
@@ -623,9 +646,15 @@ def compute_drift_report(
         categorical_features=cat,
     )
 
-    metrics = [DataDriftPreset()]
+    # Per-column PSI (0.25) for features; the target preset also covers the target
+    # AND prediction columns with the same per-column PSI test.
+    metrics = [
+        DataDriftPreset(stattest="psi", stattest_threshold=DEFAULT_PSI_THRESHOLD)
+    ]
     if has_target:
-        metrics.append(TargetDriftPreset())  # covers target AND prediction columns
+        metrics.append(
+            TargetDriftPreset(stattest="psi", stattest_threshold=DEFAULT_PSI_THRESHOLD)
+        )
 
     keep = (
         num
@@ -751,8 +780,11 @@ def run_monitor_drift(
     try:
         rpt = compute_drift_report(reference, current, model=model)
         html_path.write_bytes(rpt.pop("html"))
+        # Pure per-column: a non-zero share means at least one feature column
+        # drifted by PSI > DRIFT_PSI_THRESHOLD. ``threshold`` (the legacy share
+        # gate) is kept on the signature but no longer used for the decision.
         blocked = (
-            rpt["data_drift_score"] >= threshold
+            rpt["data_drift_score"] > 0
             or rpt["target_drift"]
             or rpt["prediction_drift"]
         )
@@ -910,8 +942,11 @@ def run_replay_monitor(
     try:
         rpt = compute_drift_report(reference, current, model=model)
         html_path.write_bytes(rpt.pop("html"))
+        # Pure per-column: a non-zero share means at least one feature column
+        # drifted by PSI > DRIFT_PSI_THRESHOLD. ``threshold`` (the legacy share
+        # gate) is kept on the signature but no longer used for the decision.
         blocked = (
-            rpt["data_drift_score"] >= threshold
+            rpt["data_drift_score"] > 0
             or rpt["target_drift"]
             or rpt["prediction_drift"]
         )

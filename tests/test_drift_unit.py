@@ -70,7 +70,11 @@ def test_compute_drift_detects_shifted_distribution():
     assert result.drifted_columns, "expected at least one drifted column"
 
 
-def test_is_blocking_threshold():
-    r = DriftResult(html=b"", drift_score=0.6, drifted_columns=[], n_reference=1, n_current=1)
-    assert r.is_blocking(threshold=0.5) is True
-    assert r.is_blocking(threshold=0.7) is False
+def test_is_blocking_is_per_column():
+    # Pure per-column: ANY drifted column blocks, regardless of the share score.
+    blocking = DriftResult(n_drifted_columns=1, drift_score=0.33)
+    assert blocking.is_blocking() is True
+    # A high share with zero flagged columns is a contradiction we never produce,
+    # but it proves the decision is driven by the column count, not the share.
+    not_blocking = DriftResult(n_drifted_columns=0, drift_score=0.6)
+    assert not_blocking.is_blocking() is False

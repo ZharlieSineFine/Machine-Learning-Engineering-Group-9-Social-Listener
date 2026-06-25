@@ -13,22 +13,31 @@ two places, both backed by `monitoring/drift_checks.py`:
 
 ## What we monitor
 
+Drift is detected **per column** with the Population Stability Index (PSI). Each
+monitored column gets its own PSI test, and a single column over the threshold is
+enough to flag drift — there is no share-of-columns gate. PSI bands: <0.1 stable,
+0.1–0.25 moderate, **>0.25 significant**.
+
 | Check | Source | Threshold | Action on fail |
 |---|---|---|---|
-| Data drift (text-length, rating, source mix) | Training frame vs. recent silver window | share of drifted columns ≥ `DRIFT_THRESHOLD` (0.3) | Flag in dashboard; in the cycle gate, block promotion |
-| Target drift (label distribution) | Training labels vs. rating-derived labels on the current window | Evidently `TargetDriftPreset` | Flag in dashboard |
+| Data drift (text-length, rating, source mix) | Training frame vs. recent silver window | any column with PSI > `DRIFT_PSI_THRESHOLD` (0.25) | Flag in dashboard; in the cycle gate, block promotion |
+| Target drift (label distribution) | Training labels vs. rating-derived labels on the current window | label PSI > `DRIFT_PSI_THRESHOLD` (0.25) | Flag in dashboard |
 | Performance — macro-F1 | Model scored on reference vs. current | F1-macro drop > `DRIFT_F1_DROP_THRESHOLD` (3%) | **Block** `Staging → Production` |
 | Performance — negative-class recall | Model scored on reference vs. current | recall_neg drop > `DRIFT_RECALL_NEG_DROP_THRESHOLD` (5%) | **Block** `Staging → Production` |
 
 The gate (`evaluate()`) blocks when **data drift OR either performance metric**
 regresses. The negative class is treated as business-critical (catching negative
 brand sentiment matters most), so it has its own recall guard alongside F1.
+`drift_score` (Evidently's share of drifted columns) is still recorded and shown
+on the dashboard gauge, but it no longer drives the block decision.
 
 ## How the gate works (`evaluate`)
 
 1. `compute_drift(reference, current)` — Evidently `DataDriftPreset` (+
-   `TargetDriftPreset` when a `label` column is present), restricted to the
-   monitored columns shared by both frames. Free text is excluded.
+   `TargetDriftPreset` when a `label` column is present), both using the PSI
+   stattest at `DRIFT_PSI_THRESHOLD`, restricted to the monitored columns shared
+   by both frames. Free text is excluded. Any single column over the PSI
+   threshold flags drift.
 2. If a `model` is given, score it **once per side** to get macro-F1 and
    negative-class recall (one `predict` call each — never two, so stateful models
    compare correctly).
@@ -58,7 +67,8 @@ warranted, retrains off-cycle by triggering `medallion_pipeline` with
 
 | Var | Default | Meaning |
 |---|---|---|
-| `DRIFT_THRESHOLD` | `0.3` | Share of drifted columns that blocks |
+| `DRIFT_PSI_THRESHOLD` | `0.25` | Per-column PSI above which a column counts as drifted (data + label) |
+| `DRIFT_THRESHOLD` | `0.3` | Legacy share-of-columns value; recorded + shown on the dashboard gauge, no longer gates |
 | `DRIFT_F1_DROP_THRESHOLD` | `0.03` | Macro-F1 drop that blocks |
 | `DRIFT_RECALL_NEG_DROP_THRESHOLD` | `0.05` | Negative-class recall drop that blocks |
 | `DRIFT_RECENT_PARTITIONS` | `7` | How many recent silver `review_date=` partitions form `current` |

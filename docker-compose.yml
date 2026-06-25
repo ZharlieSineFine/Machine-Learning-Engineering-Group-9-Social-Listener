@@ -12,6 +12,9 @@ x-pipeline-env: &pipeline-env
   YELP_TAR_PATH: /data/raw/yelp/yelp_dataset/yelp_dataset
   TRIPADVISOR_CSV_PATH: /data/raw/tripadvisor/TripAdvisor_data_cleaned.csv
   PYTHONPATH: /opt/project
+  # Per-column PSI threshold for drift (features + label); 0.25 = significant shift.
+  # Feeds both the Airflow drift DAG/gate and the dashboard gauge.
+  DRIFT_PSI_THRESHOLD: ${DRIFT_PSI_THRESHOLD:-0.25}
 
 x-airflow-common: &airflow-common
   build:
