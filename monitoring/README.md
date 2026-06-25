@@ -21,13 +21,14 @@ enough to flag drift — there is no share-of-columns gate. PSI bands: <0.1 stab
 | Check | Source | Threshold | Action on fail |
 |---|---|---|---|
 | Data drift (text-length, rating, source mix) | Training frame vs. recent silver window | any column with PSI > `DRIFT_PSI_THRESHOLD` (0.25) | Flag in dashboard; in the cycle gate, block promotion |
-| Target drift (label distribution) | Training labels vs. rating-derived labels on the current window | label PSI > `DRIFT_PSI_THRESHOLD` (0.25) | Flag in dashboard |
+| Target drift (label distribution) | Training labels vs. rating-derived labels on the current window | label PSI > `DRIFT_PSI_THRESHOLD` (0.25) | Flag in dashboard; in the cycle gate, block promotion |
 | Performance — macro-F1 | Model scored on reference vs. current | F1-macro drop > `DRIFT_F1_DROP_THRESHOLD` (3%) | **Block** `Staging → Production` |
 | Performance — negative-class recall | Model scored on reference vs. current | recall_neg drop > `DRIFT_RECALL_NEG_DROP_THRESHOLD` (5%) | **Block** `Staging → Production` |
 
-The gate (`evaluate()`) blocks when **data drift OR either performance metric**
-regresses. The negative class is treated as business-critical (catching negative
-brand sentiment matters most), so it has its own recall guard alongside F1.
+The gate (`evaluate()`) blocks when **feature drift OR label drift OR either
+performance metric** regresses. The negative class is treated as business-critical
+(catching negative brand sentiment matters most), so it has its own recall guard
+alongside F1.
 `drift_score` (Evidently's share of drifted columns) is still recorded and shown
 on the dashboard gauge, but it no longer drives the block decision.
 
@@ -36,8 +37,8 @@ on the dashboard gauge, but it no longer drives the block decision.
 1. `compute_drift(reference, current)` — Evidently `DataDriftPreset` (+
    `TargetDriftPreset` when a `label` column is present), both using the PSI
    stattest at `DRIFT_PSI_THRESHOLD`, restricted to the monitored columns shared
-   by both frames. Free text is excluded. Any single column over the PSI
-   threshold flags drift.
+   by both frames. Free text is excluded. Any single feature column **or** the
+   label over the PSI threshold flags drift and blocks promotion.
 2. If a `model` is given, score it **once per side** to get macro-F1 and
    negative-class recall (one `predict` call each — never two, so stateful models
    compare correctly).

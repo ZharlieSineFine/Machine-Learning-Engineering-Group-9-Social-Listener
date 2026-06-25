@@ -141,15 +141,18 @@ class DriftResult:
     report_path: Optional[str] = None
     n_drifted_columns: int = 0
     dataset_drift: bool = False
+    target_drift: bool = False          # label distribution drifted (PSI > threshold)
+    target_drift_score: Optional[float] = None
     passed_gate: bool = True            # True == no actionable drift
     evidently_ran: bool = False         # False if we fell back to the no-op stub
 
     def is_blocking(self, threshold: float = DEFAULT_DRIFT_THRESHOLD) -> bool:
         # Pure per-column: ANY monitored column flagged by the per-column PSI test
-        # (PSI > DRIFT_PSI_THRESHOLD) blocks. ``threshold`` (the legacy
-        # share-of-columns gate) is accepted for signature compatibility but no
-        # longer drives the decision; ``drift_score`` still carries the share.
-        return self.n_drifted_columns >= 1
+        # (PSI > DRIFT_PSI_THRESHOLD) blocks — a feature column OR the label.
+        # ``threshold`` (the legacy share-of-columns gate) is accepted for
+        # signature compatibility but no longer drives the decision;
+        # ``drift_score`` still carries the share.
+        return self.n_drifted_columns >= 1 or self.target_drift
 
 
 # ---------------------------------------------------------------------------
@@ -265,15 +268,24 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
     drifted_columns: list = []
     n_drifted = 0
     dataset_drift = False
+    target_drift = False
+    target_drift_score = None
     for m in payload.get("metrics", []):
-        if m.get("metric") == "DatasetDriftMetric":
-            res = m.get("result", {})
+        metric = m.get("metric")
+        res = m.get("result", {})
+        if metric == "DatasetDriftMetric":
             drift_score = float(res.get("share_of_drifted_columns", 0.0))
             n_drifted = int(res.get("number_of_drifted_columns", 0))
             dataset_drift = bool(res.get("dataset_drift", False))
-        if m.get("metric") == "DataDriftTable":
-            cols = m.get("result", {}).get("drift_by_columns", {})
+        elif metric == "DataDriftTable":
+            cols = res.get("drift_by_columns", {})
             drifted_columns = [c for c, v in cols.items() if v.get("drift_detected")]
+        elif metric == "ColumnDriftMetric" and res.get("column_name") == TARGET_COL:
+            # TargetDriftPreset's per-column PSI on the label. DatasetDriftMetric
+            # counts features only, so the label is gated through this branch.
+            target_drift = bool(res.get("drift_detected", False))
+            score = res.get("drift_score")
+            target_drift_score = float(score) if score is not None else None
 
     # Evidently's save_html wants a filesystem path — round-trip via a temp file.
     import tempfile
@@ -297,6 +309,8 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
         n_current=len(cur),
         n_drifted_columns=n_drifted,
         dataset_drift=dataset_drift,
+        target_drift=target_drift,
+        target_drift_score=target_drift_score,
         evidently_ran=True,
     )
 
@@ -360,9 +374,11 @@ def evaluate(
 ) -> dict:
     """End-to-end: compute drift, score the model, upload HTML, gate promotion.
 
-    Blocks promotion when EITHER data drift crosses ``drift_threshold`` OR (when a
-    ``model`` is given) macro-F1 drops past ``f1_drop_threshold`` OR negative-class
-    recall drops past ``recall_neg_drop_threshold``.
+    Blocks promotion when ANY of: a feature column drifts (PSI > psi_threshold),
+    the label distribution drifts (PSI > psi_threshold), or — when a ``model`` is
+    given — macro-F1 drops past ``f1_drop_threshold`` OR negative-class recall
+    drops past ``recall_neg_drop_threshold``. ``drift_threshold`` is retained on
+    the signature for back-compat but no longer drives the decision.
 
     Order of operations: upload + insert FIRST, then raise — so the failing report
     is still discoverable in the dashboard. ``raise_on_block=True`` raises
@@ -409,16 +425,22 @@ def evaluate(
         "recall_neg_drop": recall_neg_drop,
         "recall_neg_blocks": recall_neg_blocks,
         "drift_blocks": drift_blocks,
+        "target_drift": drift.target_drift,
+        "target_drift_score": drift.target_drift_score,
         "blocked_promotion": blocked,
     }
 
     if blocked and raise_on_block:
         reasons = []
         if drift_blocks:
+            parts = []
+            if drift.n_drifted_columns >= 1:
+                parts.append(f"{drift.n_drifted_columns} feature column(s) {drift.drifted_columns}")
+            if drift.target_drift:
+                parts.append("label")
             reasons.append(
-                f"{drift.n_drifted_columns} column(s) drifted by PSI > "
-                f"{DEFAULT_PSI_THRESHOLD:.2f} (drift_score={drift.drift_score:.3f}, "
-                f"cols={drift.drifted_columns})"
+                f"drift in {' + '.join(parts)} by PSI > {DEFAULT_PSI_THRESHOLD:.2f} "
+                f"(drift_score={drift.drift_score:.3f})"
             )
         if f1_blocks:
             reasons.append(

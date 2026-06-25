@@ -78,3 +78,9 @@ def test_is_blocking_is_per_column():
     # but it proves the decision is driven by the column count, not the share.
     not_blocking = DriftResult(n_drifted_columns=0, drift_score=0.6)
     assert not_blocking.is_blocking() is False
+
+
+def test_is_blocking_on_label_drift_alone():
+    # Label (target) drift blocks even when no feature column drifted.
+    r = DriftResult(n_drifted_columns=0, drift_score=0.0, target_drift=True)
+    assert r.is_blocking() is True
