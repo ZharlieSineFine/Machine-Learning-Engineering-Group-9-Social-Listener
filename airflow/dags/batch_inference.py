@@ -1,27 +1,3 @@
-"""Airflow DAG — production batch inference (runs when fresh data lands).
-
-The read-side serving step: each time the medallion publishes a fresh data build,
-score the latest silver window with the champion model and write the predictions
-into the Postgres ``reviews`` table the dashboard reads.
-
-    medallion publish ──(Dataset)──▶ score latest silver ─▶ champion ─▶ reviews ─▶ dashboard
-
-Scheduling is **data-aware**: the DAG is triggered by the ``reviews_gold`` Dataset
-that ``medallion_pipeline``'s ``publish`` task updates — not a cron. This keeps a
-*real* data dependency (inference scores what was just built) while staying a
-**separate** DAG with its own retries/failure domain, so a data-build failure can't
-take serving down. No DAG imperatively triggers another — the coupling is the
-declarative Dataset.
-
-``INFERENCE_PAUSED=1`` is a manual kill-switch to pause serving (e.g. during an
-incident) without unpausing the DAG.
-
-The inference itself reuses ``serving.batch_infer.run_on_silver`` — the same pure
-code path the CLI/tests use. Imports are deferred into the task callables so DAG
-parsing stays light and a missing optional dep can't break the whole scheduler.
-
-Owner: Charlie + Ha (Data & Eval).
-"""
 from __future__ import annotations
 
 import os
@@ -29,7 +5,6 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# /opt/project is the in-container mount of the repo root (see docker-compose).
 _REPO_ROOT = Path("/opt/project")
 if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))

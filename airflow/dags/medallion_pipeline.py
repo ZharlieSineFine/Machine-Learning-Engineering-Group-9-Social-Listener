@@ -1,33 +1,3 @@
-"""Airflow DAG — the build pipeline: data every 6h + an on-demand model retrain.
-
-Runs every 6h and builds the medallion; the train→promote branch is
-human-triggered (it stays short-circuited on the scheduled runs):
-
-    dep_check → bronze → silver → ge_gate → gold → publish
-                                    │
-                                    └─ (FORCE_TRAIN=1?) → train → gate → promote → reload_api
-                                                                      └──────┴─► completed
-
-This consolidates the old ``run_daily_medallion`` (data) and
-``medallion_train_cycle`` (retrain) DAGs, which shared the bronze→gold prefix.
-Drift **monitoring lives in its own DAG** (``evaluate_and_monitor``) — it's a
-read-only observer, kept separate so an Evidently hiccup pages as a *monitoring*
-failure, not a pipeline failure. The heavy DistilBERT challenger likewise stays in
-``shadow_deploy_distilbert`` (deps that aren't in the Airflow image).
-
-Design choice — **data + inference every 6h, retrain on demand.** The data layers
-refresh on every run; the train→promote branch is short-circuited unless a human
-sets ``FORCE_TRAIN=1`` (off-cycle drift response / demos / tests). The model is
-**not** retrained on a schedule: ``evaluate_and_monitor`` detects drift and alerts
-a human, who triggers this DAG with ``FORCE_TRAIN=1`` if a retrain is warranted.
-Inference itself runs every 6h in the separate ``batch_inference`` DAG.
-
-Every task body is a thin wrapper around the same pure functions the CLIs/tests
-use (``data.run_daily`` / ``data.refine`` / ``monitoring.drift_checks`` /
-``models.*``) — nothing is reimplemented here.
-
-Owner: Charlie + Ha (Data & Eval) + Van (Modeler).
-"""
 from __future__ import annotations
 
 import os
@@ -36,8 +6,6 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-# /opt/project is the in-container mount of the repo root (see docker-compose),
-# so `from data...` / `from models...` resolve from inside the DAG.
 _REPO_ROOT = Path("/opt/project")
 if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -48,10 +16,6 @@ from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.utils.trigger_rule import TriggerRule
 
-# Declarative data dependency: the ``publish`` task updates this Dataset on success,
-# which data-triggers the ``batch_inference`` DAG (same URI there). This couples the
-# build to serving via the *data*, not an imperative cross-DAG trigger — so inference
-# scores what was just built while staying a separate, isolated DAG.
 REVIEWS_GOLD_DATASET = Dataset("postgres://app/reviews_gold")
 
 from data.ingest.ingest_reviews import DEFAULT_SILVER_RECENT_YEARS
@@ -73,11 +37,8 @@ _GOLD_ROOT = _REPO_ROOT / "data" / "gold"
 _TRAINING_CSV = _GOLD_ROOT / "_training_frame.csv"
 
 
-# ---------------------------------------------------------------------------
-# shared infra helpers (env-gated, same env docker-compose injects)
-# ---------------------------------------------------------------------------
 def _minio_client():
-    """boto3 S3 client pointed at MinIO, from the same env the stack already sets."""
+    """boto3 S3 client pointed at MinIO"""
     import boto3
     from botocore.client import Config
 
@@ -100,11 +61,8 @@ def _app_dsn() -> str:
     return f"postgresql://{user}:{pw}@{host}:{port}/{db}"
 
 
-# ---------------------------------------------------------------------------
-# data layers: bronze → silver → ge_gate → gold → publish
-# ---------------------------------------------------------------------------
 def _task_bronze(**context) -> None:
-    run_date = context["ds"]  # YYYY-MM-DD from Airflow logical date
+    run_date = context["ds"]
     _run_bronze(run_date, _SOURCES, _BRONZE_ROOT)
     print(f"[pipeline.bronze] {run_date}: landed {_SOURCES}")
 
@@ -120,7 +78,7 @@ def _task_silver(**context) -> list[str]:
     )
     affected = sorted(affected)
     print(f"[pipeline.silver] {run_date}: {len(affected)} review_date partition(s)")
-    return affected  # -> XCom
+    return affected
 
 
 def _task_ge_gate(**context) -> list[str]:
@@ -128,7 +86,7 @@ def _task_ge_gate(**context) -> list[str]:
     if not affected:
         print("[pipeline.ge_gate] no affected partitions; skipping validation")
         return affected
-    validate_silver_partitions(_SILVER_ROOT, affected)  # raises DailyRunError on violation
+    validate_silver_partitions(_SILVER_ROOT, affected) 
     print(f"[pipeline.ge_gate] validated {len(affected)} partition(s)")
     return affected
 
@@ -154,17 +112,12 @@ def _task_gold(**context) -> dict:
 
 
 def _task_publish(**context) -> dict:
-    """Mirror the affected partitions to MinIO + upsert Postgres.
-
-    Env-gated via ``data.publish.publish_run``: a clean no-op when MinIO/Postgres
-    aren't configured, so the DAG stays green in environments without them.
-    """
     info = context["ti"].xcom_pull(task_ids="gold") or {}
     affected = info.get("review_dates") or []
     if not affected:
         print("[pipeline.publish] no affected partitions; nothing to publish")
         return {}
-    from data.publish import publish_run  # lazy: boto3/psycopg2 only needed here
+    from data.publish import publish_run 
 
     run_date = context["ds"]
     summary = publish_run(
@@ -178,25 +131,13 @@ def _task_publish(**context) -> dict:
     return summary or {}
 
 
-# ---------------------------------------------------------------------------
-# model branch: (weekend?) → train → gate → promote → reload_api
-# ---------------------------------------------------------------------------
 def _should_train(**context) -> bool:
-    """ShortCircuit: the train→promote branch is human-triggered only.
-
-    Data + inference refresh every 6h, but the model is **not** retrained on a
-    schedule. The branch stays short-circuited unless ``FORCE_TRAIN=1`` is set — a
-    human triggers this DAG that way for an off-cycle retrain (e.g. in response to a
-    drift alert from ``evaluate_and_monitor``), a demo, or a test.
-    """
     forced = os.getenv("FORCE_TRAIN") == "1"
     print(f"[pipeline.should_train] FORCE_TRAIN={'1' if forced else '0'} -> train={forced}")
     return forced
 
 
 def _task_train(**_context) -> dict:
-    # Build the training frame from Gold (falls back to sample CSV if Gold empty),
-    # then train via the unchanged models.train.run entry point.
     csv_path = materialize_training_csv(_TRAINING_CSV, _GOLD_ROOT)
     result = train_run(data_path=csv_path)
     print(
@@ -208,14 +149,6 @@ def _task_train(**_context) -> dict:
 
 
 def _task_gate(**context) -> dict:
-    """Promotion gate: data drift OR performance regression between the training
-    frame (reference) and the recent silver window (current).
-
-    Loads the just-trained model, scores it on both sides (macro-F1 + negative-class
-    recall), runs the Evidently report, uploads HTML + writes the
-    ``monitoring_reports`` row, and returns ``blocked_promotion`` for ``promote`` to
-    honour. Never raises — promotion is gated by the flag, not by a failed task.
-    """
     import pickle
 
     import pandas as pd
@@ -239,7 +172,6 @@ def _task_gate(**context) -> dict:
         model = pickle.load(fh)
 
     # reference = the training frame (text + label); current = recent silver with
-    # labels derived from rating (silver carries no label of its own).
     reference = pd.read_csv(_TRAINING_CSV)
     recent = _load_recent_silver(_SILVER_ROOT, DRIFT_RECENT_PARTITIONS)
     if recent is None or recent.empty:
@@ -256,7 +188,7 @@ def _task_gate(**context) -> dict:
 
     conn = psycopg2.connect(_app_dsn())
     try:
-        with conn:  # commit on success
+        with conn:
             result = evaluate(
                 reference,
                 current,
@@ -317,9 +249,6 @@ def _task_reload_api(**context) -> None:
         method="POST",
         headers={"Authorization": f"Bearer {token}"},
     )
-    # Best-effort: the model is already in Production (durable). A flaky reload
-    # shouldn't fail the cycle — the API picks the new model up on its next
-    # restart/load regardless. Log and move on.
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 (trusted internal URL)
             print(f"[pipeline.reload_api] {api_url}/reload -> {resp.status} {resp.read().decode()}")
@@ -331,7 +260,7 @@ with DAG(
     dag_id="medallion_pipeline",
     description="6h data refresh (bronze→silver→GE→gold→publish) + on-demand (FORCE_TRAIN=1) train→gate→promote→reload",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
+    schedule="0 */6 * * *",
     catchup=False,
     default_args={
         "owner": "data",
@@ -340,7 +269,6 @@ with DAG(
     },
     tags=["pipeline", "medallion", "model"],
 ) as dag:
-    # --- data layers (run every 6h) ---
     dep_check_source_data = EmptyOperator(task_id="dep_check_source_data")
     bronze = PythonOperator(task_id="bronze", python_callable=_task_bronze)
     silver = PythonOperator(task_id="silver", python_callable=_task_silver)
@@ -353,7 +281,6 @@ with DAG(
         outlets=[REVIEWS_GOLD_DATASET],
     )
 
-    # --- model branch (human-triggered: FORCE_TRAIN=1 only) ---
     should_train = ShortCircuitOperator(
         task_id="should_train",
         python_callable=_should_train,
@@ -366,16 +293,11 @@ with DAG(
 
     pipeline_completed = EmptyOperator(
         task_id="pipeline_completed",
-        # Runs once the data branch is done and the optional branches have either
-        # finished or been short-circuited (skipped) — never on upstream failure.
         trigger_rule=TriggerRule.NONE_FAILED,
     )
 
-    # data spine
     dep_check_source_data >> bronze >> silver >> ge_gate >> gold >> publish
 
-    # model branch fans out from gold (on FORCE_TRAIN=1: trains on the data just built)
     gold >> should_train >> train >> gate >> promote >> reload_api
 
-    # single terminal node the whole graph converges on
     [publish, reload_api] >> pipeline_completed

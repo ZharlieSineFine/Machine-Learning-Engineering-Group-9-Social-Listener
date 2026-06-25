@@ -1,30 +1,3 @@
-"""Airflow DAG — DistilBERT shadow deploy (challenger → MLflow Staging).
-
-Fine-tunes the DistilBERT challenger and registers it to MLflow under a
-*separate* model name (``sentiment-distilbert``) at the **Staging** stage. It
-never reaches Production, so the FastAPI service — which loads only
-``models:/{MODEL_NAME}/Production`` (default ``sentiment-baseline``) via
-``mlflow.sklearn`` — is unaffected. The challenger simply sits in the registry
-ready for a future serving-side shadow lane (ARCHITECTURE.md §4).
-
-Thin wrapper around the unchanged pure functions:
-    * ``models.gold_loader.materialize_training_csv`` — Gold → training CSV
-      (same helper full_cycle.py uses), with sample-CSV fallback.
-    * ``models.distilbert_finetune.train_distilbert`` — fine-tune + save.
-
-Lean-image contract: ``torch`` / ``transformers`` / ``datasets`` are NOT in the
-Airflow image. When they're absent the train task raises ``AirflowSkipException``
-so the task is **skipped** (not failed) and the DAG list stays green. Wire the
-deps into the image to actually train.
-
-Env knobs (all optional):
-    DISTILBERT_MODEL_NAME   registered model name      (default sentiment-distilbert)
-    DISTILBERT_EXPERIMENT   MLflow experiment          (default sentiment-distilbert)
-    DISTILBERT_MAX_STEPS    cap training steps for CPU (default 50; <=0 = full run)
-    DISTILBERT_EPOCHS       num train epochs           (default 4)
-
-Owner: Van (Modeler) + Charlie + Ha.
-"""
 from __future__ import annotations
 
 import os
@@ -52,9 +25,9 @@ STAGING_STAGE = "Staging"
 def _require_distilbert_deps() -> None:
     """Skip the task cleanly when the heavy DL deps aren't in the image."""
     try:
-        import datasets  # noqa: F401
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
+        import datasets
+        import torch  
+        import transformers  
     except ImportError as exc:
         raise AirflowSkipException(
             "DistilBERT deps (torch/transformers/datasets) not installed; "
@@ -64,7 +37,6 @@ def _require_distilbert_deps() -> None:
 
 def _register_staging(out_dir: Path, metrics: dict) -> tuple[str, str | None]:
     """Log the saved model+tokenizer and transition the new version to Staging.
-
     Returns (model_name, version). No-ops (returns version=None) when
     MLFLOW_TRACKING_URI is unset, matching the other DAGs' offline contract.
     """
@@ -133,14 +105,12 @@ def _task_train_and_register(**_context) -> dict:
     from models.distilbert_finetune import TrainConfig, train_distilbert
     from models.gold_loader import materialize_training_csv
 
-    # Build the training frame from Gold (falls back to sample CSV when empty),
-    # reusing the same helper as full_cycle.py:_task_train.
     csv_path = materialize_training_csv(_TRAINING_CSV, _GOLD_ROOT)
     df = pd.read_csv(csv_path)
 
     cfg = TrainConfig(
         num_epochs=int(os.getenv("DISTILBERT_EPOCHS", "4")),
-        max_steps=int(os.getenv("DISTILBERT_MAX_STEPS", "50")),  # cap for CPU runs
+        max_steps=int(os.getenv("DISTILBERT_MAX_STEPS", "50")), 
     )
     out_dir, metrics = train_distilbert(df, _OUT_DIR, cfg)
     print(
@@ -165,7 +135,7 @@ with DAG(
     description="Fine-tune DistilBERT challenger -> register MLflow Staging (shadow)",
     start_date=datetime(2025, 1, 1),
     # Challenger retraining is human-triggered (manual), like the baseline retrain in
-    # medallion_pipeline (FORCE_TRAIN=1) — the model is not retrained on a schedule.
+    # medallion_pipeline (FORCE_TRAIN=1)
     schedule=None,  # manual / triggered only
     catchup=False,
     default_args={

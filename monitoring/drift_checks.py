@@ -1,38 +1,3 @@
-"""Evidently drift report + promotion gate.
-
-Two layers live here, sharing one Evidently code path:
-
-1. **Observational drift** (`run_drift_check`) — reference = training/sample
-   distribution, current = the most recent silver partitions. Always returns a
-   ``DriftResult`` (never raises on Evidently internals) so the every-6h
-   ``evaluate_and_monitor`` DAG stays green while the pipeline settles. Falls
-   back to a train-vs-itself stub when no silver data exists yet.
-
-2. **Promotion gate** (`evaluate`) — given two labelled frames + a trained model,
-   it computes data drift AND model performance (macro-F1 + negative-class
-   recall), uploads the HTML report to MinIO, writes a pointer row to
-   ``monitoring_reports``, and blocks promotion when EITHER:
-
-       * any monitored column drifts (per-column PSI > psi_threshold), OR
-       * f1_macro drops > f1_drop_threshold, OR
-       * recall on the ``negative`` class drops > recall_neg_drop_threshold.
-
-Drift detection is **pure per-column**: every monitored column gets its own PSI
-(Population Stability Index) test, and a single drifted column is enough to flag
-drift. ``drift_score`` still carries Evidently's share-of-drifted-columns for the
-dashboard gauge, but it no longer drives the decision.
-
-   Upload + DB insert happen **before** any raise, so a blocking report stays
-   discoverable in the dashboard. Used by ``medallion_pipeline`` between
-   ``train`` and ``promote``.
-
-Runnable three ways, like ``models/train.py``: from an Airflow PythonOperator,
-from the CLI (``python monitoring/drift_checks.py``), or from a unit test.
-Evidently/sklearn imports are deferred into the functions that need them so the
-module imports cleanly even where those deps are absent.
-
-Owner: Charlie + Ha (Monitoring).
-"""
 from __future__ import annotations
 
 import json
@@ -44,10 +9,6 @@ from typing import Optional
 
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Path resolution — works both inside the Airflow container (where the repo is
-# split across /opt/project/{data,monitoring}) and from a local checkout.
-# ---------------------------------------------------------------------------
 def _first_existing(*candidates: Path) -> Optional[Path]:
     for c in candidates:
         if c and c.exists():
@@ -55,7 +16,6 @@ def _first_existing(*candidates: Path) -> Optional[Path]:
     return None
 
 
-# Local checkout root: monitoring/ -> repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_SAMPLE_CSV = _first_existing(
@@ -64,53 +24,31 @@ DEFAULT_SAMPLE_CSV = _first_existing(
     _REPO_ROOT / "data" / "sample" / "reviews_sample.csv",  # local checkout
 )
 
-# Silver root holding ``review_date=YYYY-MM-DD/part.parquet`` partitions, which
-# the medallion DAG produces. ``current`` data is read from the most recent
-# partitions here. Falls back to the train-vs-itself stub if empty.
 DEFAULT_SILVER_ROOT = _first_existing(
     Path(os.getenv("DRIFT_SILVER_ROOT", "")) if os.getenv("DRIFT_SILVER_ROOT") else None,
     Path("/opt/project/data/silver/reviews"),  # Airflow container mount
     _REPO_ROOT / "data" / "silver" / "reviews",  # local checkout
 )
 
-# How many recent review_date partitions form the ``current`` window.
 DRIFT_RECENT_PARTITIONS = int(os.getenv("DRIFT_RECENT_PARTITIONS", "7"))
 
-# Where the observational HTML report is written before upload to MinIO.
 DEFAULT_REPORT_DIR = Path(
     os.getenv("DRIFT_REPORT_DIR", "/opt/project/monitoring/reports")
 )
 
-# ---------------------------------------------------------------------------
-# Gate configuration
-# ---------------------------------------------------------------------------
-# Columns the drift report reasons over. Free text is excluded — Evidently would
-# treat it as a high-cardinality categorical and add only noise. Built defensively
-# (see ``_column_mapping``): only columns present in BOTH frames are used, so the
-# gate works whether ``current`` comes from silver (rating/source) or the Gold
-# training frame (text/label only).
 NUMERICAL_COLS = ["text_len", "rating"]
 CATEGORICAL_COLS = ["source"]
 TARGET_COL = "label"
 NEG_LABEL = "negative"
 
-# Per-column PSI threshold: a column is flagged drifted when its Population
-# Stability Index exceeds this. 0.25 is the classic "significant population shift"
-# band (<0.1 stable, 0.1-0.25 moderate, >0.25 significant). Applied to BOTH the
-# feature columns (data drift) and the target/prediction columns (label drift).
 DEFAULT_PSI_THRESHOLD = float(os.getenv("DRIFT_PSI_THRESHOLD", "0.25"))
-# Legacy share-of-drifted-columns threshold. No longer drives the gate (drift is
-# pure per-column now), but kept for the dashboard gauge band + back-compat.
 DEFAULT_DRIFT_THRESHOLD = float(os.getenv("DRIFT_THRESHOLD", "0.3"))
-# F1-macro drop that blocks promotion (ARCHITECTURE/WORKFLOW: "> 3%").
 DEFAULT_F1_DROP_THRESHOLD = float(os.getenv("DRIFT_F1_DROP_THRESHOLD", "0.03"))
-# Negative-class recall drop that blocks promotion (business-critical class).
 DEFAULT_RECALL_NEG_DROP_THRESHOLD = float(
     os.getenv("DRIFT_RECALL_NEG_DROP_THRESHOLD", "0.05")
 )
 DEFAULT_BUCKET = "monitoring"
 
-# Back-compat alias for the env-driven observational threshold.
 DRIFT_THRESHOLD = DEFAULT_DRIFT_THRESHOLD
 
 
@@ -125,14 +63,6 @@ class PromotionBlocked(RuntimeError):
 
 @dataclass
 class DriftResult:
-    """Unified result for both the observational check and the gate.
-
-    The observational path (``run_drift_check``) sets ``report_path`` /
-    ``passed_gate`` / ``evidently_ran``; the gate path (``compute_drift``) sets
-    ``html`` / ``drifted_columns``. Every field has a default so either path can
-    construct it with only the fields it knows.
-    """
-
     html: bytes = b""
     drift_score: float = 0.0            # share of drifted columns (0.0 .. 1.0)
     drifted_columns: list = field(default_factory=list)
@@ -155,15 +85,7 @@ class DriftResult:
         return self.n_drifted_columns >= 1 or self.target_drift
 
 
-# ---------------------------------------------------------------------------
-# Model performance — macro-F1 + negative-class recall
-# ---------------------------------------------------------------------------
 def compute_model_f1(model, df: pd.DataFrame) -> float:
-    """Macro-F1 of ``model`` on ``df`` (expects ``text`` + ``label`` columns).
-
-    Works for any model with a ``.predict([text]) -> [label]`` interface —
-    sklearn Pipeline, mlflow.sklearn loaded model, or a custom wrapper.
-    """
     from sklearn.metrics import f1_score
 
     df = df.dropna(subset=["text", "label"])
@@ -211,9 +133,6 @@ def _score_model(model, df: pd.DataFrame) -> tuple[float, float]:
     return f1, recall_neg
 
 
-# ---------------------------------------------------------------------------
-# Drift — pure compute (no DB, no S3)
-# ---------------------------------------------------------------------------
 def _column_mapping(reference_df: pd.DataFrame, current_df: pd.DataFrame):
     """Evidently ColumnMapping restricted to columns present in BOTH frames."""
     from evidently import ColumnMapping
@@ -315,9 +234,6 @@ def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> Drift
     )
 
 
-# ---------------------------------------------------------------------------
-# Side-effects — MinIO + Postgres
-# ---------------------------------------------------------------------------
 def upload_html_to_minio(
     minio_client,
     html: bytes,
@@ -355,9 +271,6 @@ def insert_pointer_row(
         return cur.fetchone()[0]
 
 
-# ---------------------------------------------------------------------------
-# Promotion gate — drift + performance, uploads, gates
-# ---------------------------------------------------------------------------
 def evaluate(
     reference_df: pd.DataFrame,
     current_df: pd.DataFrame,
@@ -460,9 +373,6 @@ def evaluate(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Observational feature frame + silver loading
-# ---------------------------------------------------------------------------
 def _features_from_reviews(df: pd.DataFrame) -> pd.DataFrame:
     """Project raw reviews onto the columns we monitor.
 
@@ -540,9 +450,6 @@ def _build_reference_and_current(
     return reference[shared], current[shared], True
 
 
-# ---------------------------------------------------------------------------
-# Observational entry point — never raises on Evidently internals
-# ---------------------------------------------------------------------------
 def run_drift_check(
     sample_csv: Optional[Path] = None,
     report_dir: Optional[Path] = None,
@@ -596,9 +503,6 @@ def run_drift_check(
         )
 
 
-# ---------------------------------------------------------------------------
-# Target + prediction drift (observational monitor)
-# ---------------------------------------------------------------------------
 @dataclass
 class MonitorResult:
     """Full observational drift summary: data + target + (optional) prediction.
@@ -628,17 +532,7 @@ def compute_drift_report(
     current_df: pd.DataFrame,
     model=None,
 ) -> dict:
-    """One Evidently report: data drift + target drift + (optional) prediction drift.
-
-    * **Data drift** — feature columns (text_len / rating / source).
-    * **Target drift** — the ground-truth ``label`` distribution (present when
-      ``current`` carries a label; the monitor derives it from ``rating``).
-    * **Prediction drift** — the model's predicted-label distribution, scored on
-      both frames when a ``model`` is given. This is what catches a model whose
-      output mix shifts even before labels are available.
-
-    Pure compute (no DB/S3). Returns scores, drift booleans, and ``html`` bytes.
-    """
+    
     from evidently import ColumnMapping
     from evidently.metric_preset import DataDriftPreset, TargetDriftPreset
     from evidently.report import Report
@@ -646,14 +540,13 @@ def compute_drift_report(
     ref = reference_df.copy()
     cur = current_df.copy()
 
-    # Score the model once per side to get a `prediction` column for drift.
     has_pred = False
     if model is not None and "text" in ref.columns and "text" in cur.columns:
         try:
             ref["prediction"] = model.predict(ref["text"].astype(str).tolist())
             cur["prediction"] = model.predict(cur["text"].astype(str).tolist())
             has_pred = True
-        except Exception as exc:  # scoring is best-effort; degrade to no pred drift
+        except Exception as exc: 
             print(f"[drift] prediction scoring failed, skipping prediction drift: {exc}")
 
     shared = set(ref.columns) & set(cur.columns)
@@ -747,12 +640,6 @@ def _build_monitor_frames(
     silver_root: Optional[Path] = None,
     n_partitions: int = DRIFT_RECENT_PARTITIONS,
 ) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
-    """Reference = sample/training CSV (text+label); current = recent silver with
-    ``label`` derived from ``rating`` (silver carries no label of its own).
-
-    Returns ``(reference, current, used_silver)``. Falls back to reference-vs-itself
-    when no silver exists yet so the monitor stays green.
-    """
     reference = _features_from_reviews(pd.read_csv(sample_csv))
 
     silver_root = silver_root or DEFAULT_SILVER_ROOT
@@ -778,13 +665,6 @@ def run_monitor_drift(
     silver_root: Optional[Path] = None,
     model=None,
 ) -> MonitorResult:
-    """Observational monitor: data + target + prediction drift over the recent
-    silver window. Writes the HTML report to disk and returns a ``MonitorResult``.
-
-    ``blocked`` is True when data drift crosses ``threshold`` OR target/prediction
-    drift is detected — the monitor DAG uses it to fire a retrain. Never raises on
-    Evidently internals so the every-6h DAG stays green.
-    """
     sample_csv = Path(sample_csv) if sample_csv else DEFAULT_SAMPLE_CSV
     if not sample_csv or not sample_csv.exists():
         raise FileNotFoundError(
@@ -802,9 +682,6 @@ def run_monitor_drift(
     try:
         rpt = compute_drift_report(reference, current, model=model)
         html_path.write_bytes(rpt.pop("html"))
-        # Pure per-column: a non-zero share means at least one feature column
-        # drifted by PSI > DRIFT_PSI_THRESHOLD. ``threshold`` (the legacy share
-        # gate) is kept on the signature but no longer used for the decision.
         blocked = (
             rpt["data_drift_score"] > 0
             or rpt["target_drift"]
@@ -826,7 +703,7 @@ def run_monitor_drift(
         )
         print(f"[drift] {_summary_for_log(asdict(result))}")
         return result
-    except Exception as exc:  # never kill the observational DAG on Evidently
+    except Exception as exc: 
         print(f"[drift] Evidently unavailable/incompatible, using stub: {exc}")
         html_path.write_text("<html><body>drift stub: evidently unavailable</body></html>")
         return MonitorResult(
@@ -840,17 +717,6 @@ def run_monitor_drift(
 def _summary_for_log(result: dict) -> str:
     return json.dumps({k: v for k, v in result.items() if k != "html"}, default=str)
 
-
-# ---------------------------------------------------------------------------
-# Replay-sourced drift (task 1) — drive the gate from the replay simulator
-# ---------------------------------------------------------------------------
-# The replay simulator (data/ingest/replay.py) writes a demo "operational" stream to
-#   data/replay/<scenario>/review_date=YYYY-MM-DD/part.parquet
-# (columns: review_id, review_date, text, label, source, scenario, brand). Here we
-# read that stream as the drift *current* window and compare it against the demo
-# holdout (the historical baseline the model was built on). The spike scenario
-# concentrates negatives on a single day, so a current window around that day drifts
-# vs the holdout while the stable scenario does not — that's the closed-loop demo.
 DEFAULT_REPLAY_ROOT = (
     _first_existing(
         Path(os.getenv("DRIFT_REPLAY_ROOT", "")) if os.getenv("DRIFT_REPLAY_ROOT") else None,
@@ -862,8 +728,8 @@ DEFAULT_REPLAY_ROOT = (
 
 DEFAULT_REPLAY_REFERENCE_CSV = _first_existing(
     Path(os.getenv("DRIFT_REPLAY_REFERENCE", "")) if os.getenv("DRIFT_REPLAY_REFERENCE") else None,
-    Path("/opt/project/data/demo/demo_holdout_full.csv"),  # Airflow container mount
-    _REPO_ROOT / "data" / "demo" / "demo_holdout_full.csv",  # local checkout
+    Path("/opt/project/data/demo/demo_holdout_full.csv"), 
+    _REPO_ROOT / "data" / "demo" / "demo_holdout_full.csv", 
 )
 
 REPLAY_REVIEW_DATE_GLOB = "review_date=*"
@@ -875,13 +741,6 @@ def load_replay_window(
     asof: Optional[str] = None,
     n_recent: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Load the replay stream for one scenario as a flat reviews frame.
-
-    Reads ``<replay_root>/<scenario>/review_date=*/part.parquet``. Optionally keeps
-    only partitions on/before ``asof`` (YYYY-MM-DD) and the most recent ``n_recent``
-    of those — together these select the "current batch" the monitor sees as the
-    stream arrives (e.g. ``asof`` = the spike day, ``n_recent`` = 1 -> that day only).
-    """
     replay_root = Path(replay_root) if replay_root else DEFAULT_REPLAY_ROOT
     scenario_root = replay_root / scenario
     if not scenario_root.exists():
@@ -916,11 +775,6 @@ def build_replay_frames(
     asof: Optional[str] = None,
     n_recent: Optional[int] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Reference = demo holdout (historical baseline); current = replay window.
-
-    Both are projected onto the monitored feature columns so Evidently sees a
-    matching schema. Both sides carry ``label`` so target drift is available.
-    """
     reference_csv = Path(reference_csv) if reference_csv else DEFAULT_REPLAY_REFERENCE_CSV
     if not reference_csv or not reference_csv.exists():
         raise FileNotFoundError(
@@ -928,11 +782,6 @@ def build_replay_frames(
         )
     reference = _features_from_reviews(pd.read_csv(reference_csv))
     current = _features_from_reviews(load_replay_window(scenario, replay_root, asof, n_recent))
-    # The replay scenarios re-date the SAME reviews and inject only a label-timing
-    # surge — text length is not a real signal here, and a single-day current window
-    # vs the full holdout makes Evidently flag text_len spuriously (even for stable).
-    # Monitor the sentiment label (the actual injected drift); keep ``text`` so a
-    # model can still be scored for prediction drift.
     cols = [c for c in ("text", "label") if c in reference.columns and c in current.columns]
     return reference[cols], current[cols]
 
@@ -947,13 +796,6 @@ def run_replay_monitor(
     threshold: float = DEFAULT_DRIFT_THRESHOLD,
     model=None,
 ) -> MonitorResult:
-    """Observational drift of a replay scenario vs the demo holdout baseline.
-
-    Mirrors ``run_monitor_drift`` but sources ``current`` from the replay
-    simulator's output instead of the live silver window — this is the demo path
-    that proves the spike scenario trips the gate while stable passes. Writes the
-    HTML report to disk and never raises on Evidently internals.
-    """
     reference, current = build_replay_frames(
         scenario, reference_csv, replay_root, asof, n_recent
     )
@@ -964,9 +806,6 @@ def run_replay_monitor(
     try:
         rpt = compute_drift_report(reference, current, model=model)
         html_path.write_bytes(rpt.pop("html"))
-        # Pure per-column: a non-zero share means at least one feature column
-        # drifted by PSI > DRIFT_PSI_THRESHOLD. ``threshold`` (the legacy share
-        # gate) is kept on the signature but no longer used for the decision.
         blocked = (
             rpt["data_drift_score"] > 0
             or rpt["target_drift"]

@@ -1,28 +1,3 @@
-"""Airflow DAG — pure-observation drift monitor (every 6h).
-
-A read-only **observer** that sits next to ``medallion_pipeline``: it compares the
-recent review window against the reference, writes an Evidently report + a
-``monitoring_reports`` pointer row (which the dashboard reads), and — when drift
-blocks the gate — fires ``send_alert``. That's it. There is **no**
-``TriggerDagRunOperator`` and no side effect on the data or the model: drift
-alerts a human, who decides whether to kick an off-cycle retrain
-(``medallion_pipeline`` with ``FORCE_TRAIN=1``).
-
-Kept separate from the build pipeline on purpose:
-  * **Failure isolation** — an Evidently hiccup here goes red as a *monitoring*
-    failure, not as a "data pipeline failed" page.
-  * **Pure observation** — read-only, its own 6h cadence, no dependency on the
-    producing DAG having just run.
-
-Default source is the observational silver window (``run_monitor_drift``), which
-observes data, target (label) **and** prediction drift; the champion model is
-loaded best-effort so prediction drift is added when available (label drift needs
-no model). Set ``DRIFT_REPLAY_SCENARIO=spike`` (with optional ``DRIFT_REPLAY_ASOF``
-/ ``DRIFT_REPLAY_N_RECENT``) to drive the gate from the replay simulator — the demo
-path where the negative-review spike trips the gate.
-
-Owner: Charlie + Ha (Monitoring).
-"""
 from __future__ import annotations
 
 import os
@@ -30,7 +5,6 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# /opt/project is the in-container mount of the repo root (see docker-compose).
 _REPO_ROOT = Path("/opt/project")
 if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -116,16 +90,7 @@ def _load_champion_best_effort():
 
 
 def _task_drift(**context) -> dict:
-    """Run the Evidently drift check, persist the report + a monitoring_reports row.
-
-    Observes **data, target (label) and prediction** drift over the recent silver
-    window via ``run_monitor_drift``; the champion model is loaded best-effort to
-    add prediction drift (label drift needs no model). Set ``DRIFT_REPLAY_SCENARIO``
-    (stable|spike) to drive the gate from the replay simulator instead — the demo
-    path where the spike trips the gate. Optional ``DRIFT_REPLAY_ASOF`` /
-    ``DRIFT_REPLAY_N_RECENT`` select the current window.
-    """
-    run_date = context["ds"]  # YYYY-MM-DD logical date
+    run_date = context["ds"] 
 
     model = _load_champion_best_effort()
     scenario = os.getenv("DRIFT_REPLAY_SCENARIO")
@@ -189,13 +154,8 @@ def _should_alert(**context) -> bool:
 
 
 def _task_send_alert(**context) -> None:
-    """Surface the drift alert.
+    # Surface the drift alert.
 
-    The ``monitoring_reports`` row written by ``drift_check`` is the durable signal
-    the dashboard renders; this task makes the alert loud in the Airflow logs so a
-    human notices and can decide whether to trigger an off-cycle retrain
-    (``medallion_pipeline`` with ``FORCE_TRAIN=1``). No automatic retrain fires.
-    """
     info = context["ti"].xcom_pull(task_ids="drift_check") or {}
     print(
         "[evaluate_and_monitor.ALERT] *** DATA DRIFT DETECTED *** "
@@ -209,7 +169,7 @@ with DAG(
     dag_id="evaluate_and_monitor",
     description="Pure-observation Evidently drift monitor → monitoring_reports + alert (no retrain)",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *",  # every 6h, per ARCHITECTURE.md §3 batch cycle
+    schedule="0 */6 * * *", 
     catchup=False,
     default_args={
         "owner": "data",
