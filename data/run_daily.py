@@ -8,8 +8,6 @@ same ``--run-date`` is idempotent.
     python -m data.run_daily --run-date 2026-06-06 --skip-bronze --all-years  # full history
 
 Bronze keeps the full archive; Silver defaults to the last 3 years per source.
-
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 

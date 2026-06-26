@@ -3,7 +3,6 @@
 * ``validate_silver`` — Bronze → Silver gate (no ``label`` column).
 * ``validate_reviews`` — Silver → Gold / training / Postgres gate (requires ``label``).
 
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 

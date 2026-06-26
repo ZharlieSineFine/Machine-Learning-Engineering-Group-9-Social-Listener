@@ -1,24 +1,5 @@
-"""Publish the local medallion to MinIO (objects) + Postgres (tables).
+#Publish the local medallion to MinIO (objects) + Postgres (tables).
 
-Reads the on-disk medallion produced by `run_daily` and:
-  * mirrors the bronze / silver / gold trees to ``s3://datasets/<layer>/`` (MinIO)
-  * upserts ``reviews_silver`` (from Silver parquet) and ``reviews_gold`` (Gold
-    feature_store + label_store joined on ``review_id``) into Postgres
-
-Idempotent: object mirror overwrites by key; table writes upsert on natural keys, so
-re-running a date is safe. Connection settings come from the env (see data/storage/config).
-
-Run (whole medallion on disk)::
-    python -m data.publish --layers bronze silver gold --to all
-
-Run (host-side against mapped ports)::
-    POSTGRES_HOST=localhost MLFLOW_S3_ENDPOINT_URL=http://localhost:9000 \\
-        python -m data.publish --to all
-
-`run_daily --publish` calls :func:`publish_run` to push just the partitions a daily run touched.
-
-Owner: Charlie + Ha (Data & Eval).
-"""
 from __future__ import annotations
 
 import argparse
