@@ -27,7 +27,7 @@ REVIEWS_PREDICTIONS_DATASET = Dataset("postgres://app/reviews")
 
 
 def _should_run_inference(**context) -> bool:
-    """ShortCircuit kill-switch: run unless serving is manually paused."""
+    # Kill-switch: skip the run when serving is manually paused.
     if os.getenv("INFERENCE_PAUSED") == "1":
         print("[batch_inference.guard] INFERENCE_PAUSED=1 -> skipping run")
         return False
@@ -36,14 +36,10 @@ def _should_run_inference(**context) -> bool:
 
 
 def _task_score(**context) -> dict:
-    """Score the latest silver window into ``reviews`` (production read-side).
-
-    Replaces only the most recent day (``clear_today``) and stamps the rows "now"
-    (``as_now``), so the multi-day history/timeline is preserved while today's batch
-    is refreshed with freshly-scored reviews.
-    """
     from serving.batch_infer import run_on_silver
 
+    # clear_today replaces only the most recent day; as_now stamps the rows "now",
+    # so older days stay as history while today's batch gets rescored.
     summary = run_on_silver(as_now=True, clear_today=True)
     print(f"[batch_inference] {summary}")
     return summary

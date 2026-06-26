@@ -52,13 +52,11 @@ DEFAULT_BUCKET = "monitoring"
 DRIFT_THRESHOLD = DEFAULT_DRIFT_THRESHOLD
 
 
+# Raised by evaluate(raise_on_block=True) on a blocking gate. The report is already
+# uploaded and the pointer row written before this fires, so the Airflow task log and
+# the dashboard both point at the failing report.
 class PromotionBlocked(RuntimeError):
-    """Raised by ``evaluate`` (when ``raise_on_block=True``) on a blocking gate.
-
-    The report has already been uploaded and the pointer row written by the time
-    this raises, so the Airflow task log + the dashboard both have a pointer to
-    the failing report.
-    """
+    pass
 
 
 @dataclass
@@ -96,7 +94,7 @@ def compute_model_f1(model, df: pd.DataFrame) -> float:
 
 
 def compute_model_recall_neg(model, df: pd.DataFrame) -> float:
-    """Recall of the ``negative`` class — the class we most care about catching."""
+    # Recall of the negative class, the one we most care about catching.
     from sklearn.metrics import recall_score
 
     df = df.dropna(subset=["text", "label"])
@@ -111,13 +109,9 @@ def compute_model_recall_neg(model, df: pd.DataFrame) -> float:
 
 
 def _score_model(model, df: pd.DataFrame) -> tuple[float, float]:
-    """Return ``(f1_macro, recall_neg)`` from a SINGLE prediction pass.
-
-    ``evaluate`` must score each side with exactly one ``predict`` call:
-    callers sometimes pass stateful models whose behaviour changes after the
-    first call. Computing F1 and recall via two separate calls would corrupt
-    the comparison.
-    """
+    # Return (f1_macro, recall_neg) from a SINGLE predict pass. Callers sometimes
+    # pass stateful models whose behaviour changes after the first call, so taking
+    # F1 and recall from two separate predict calls would corrupt the comparison.
     from sklearn.metrics import f1_score, recall_score
 
     df = df.dropna(subset=["text", "label"])
@@ -134,7 +128,7 @@ def _score_model(model, df: pd.DataFrame) -> tuple[float, float]:
 
 
 def _column_mapping(reference_df: pd.DataFrame, current_df: pd.DataFrame):
-    """Evidently ColumnMapping restricted to columns present in BOTH frames."""
+    # Evidently ColumnMapping restricted to columns present in BOTH frames.
     from evidently import ColumnMapping
 
     shared = set(reference_df.columns) & set(current_df.columns)
@@ -146,16 +140,14 @@ def _column_mapping(reference_df: pd.DataFrame, current_df: pd.DataFrame):
 
 
 def compute_drift(reference_df: pd.DataFrame, current_df: pd.DataFrame) -> DriftResult:
-    """Build the Evidently report and extract a single drift_score.
-
-    Pure function — no DB, no S3. Reduces both frames to their shared columns so
-    Evidently never trips on a column present on one side only.
-    """
+    # Build the Evidently report and pull out a single drift_score. Pure function,
+    # no DB or S3. Reduces both frames to their shared columns so Evidently never
+    # trips on a column that's present on one side only.
     from evidently.metric_preset import DataDriftPreset, TargetDriftPreset
     from evidently.report import Report
 
     # Drift only over the declared monitored columns that exist on BOTH sides.
-    # Free text (``text``) is deliberately excluded — it's kept on the frame for
+    # Free text (``text``) is deliberately excluded: it's kept on the frame for
     # model scoring (``_score_model``) but would only add noise to the report.
     monitored = [
         c
@@ -241,7 +233,7 @@ def upload_html_to_minio(
     report_type: str,
     bucket: str = DEFAULT_BUCKET,
 ) -> str:
-    """Upload report HTML to ``s3://<bucket>/<date>/<type>.html``. Returns the URL."""
+    # Upload report HTML to s3://<bucket>/<date>/<type>.html and return the URL.
     key = f"{run_date.isoformat()}/{report_type}.html"
     minio_client.put_object(
         Bucket=bucket,
@@ -260,7 +252,7 @@ def insert_pointer_row(
     drift_score: float,
     blocked: bool,
 ) -> int:
-    """Insert a row into ``monitoring_reports`` and return its id."""
+    # Insert a row into monitoring_reports and return its id.
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO monitoring_reports "
@@ -285,19 +277,17 @@ def evaluate(
     model=None,
     raise_on_block: bool = False,
 ) -> dict:
-    """End-to-end: compute drift, score the model, upload HTML, gate promotion.
-
-    Blocks promotion when ANY of: a feature column drifts (PSI > psi_threshold),
-    the label distribution drifts (PSI > psi_threshold), or — when a ``model`` is
-    given — macro-F1 drops past ``f1_drop_threshold`` OR negative-class recall
-    drops past ``recall_neg_drop_threshold``. ``drift_threshold`` is retained on
-    the signature for back-compat but no longer drives the decision.
-
-    Order of operations: upload + insert FIRST, then raise — so the failing report
-    is still discoverable in the dashboard. ``raise_on_block=True`` raises
-    ``PromotionBlocked`` on a block (used by the DAG so the task fails red);
-    default ``False`` lets callers inspect the returned dict.
-    """
+    # Compute drift, score the model, upload the HTML, gate promotion. Blocks when
+    # ANY of these hold: a feature column drifts (PSI > psi_threshold), the label
+    # distribution drifts (PSI > psi_threshold), or (when a model is given) macro-F1
+    # drops past f1_drop_threshold or negative-class recall drops past
+    # recall_neg_drop_threshold. drift_threshold stays on the signature for
+    # back-compat but no longer drives the decision.
+    #
+    # Upload and insert happen FIRST, then we raise, so the failing report is still
+    # discoverable in the dashboard. raise_on_block=True raises PromotionBlocked (the
+    # DAG uses this so the task fails red); the default False lets callers inspect the
+    # returned dict.
     run_date = run_date or date.today()
     drift = compute_drift(reference_df, current_df)
 
@@ -374,14 +364,11 @@ def evaluate(
 
 
 def _features_from_reviews(df: pd.DataFrame) -> pd.DataFrame:
-    """Project raw reviews onto the columns we monitor.
-
-    Mirrors the "data drift" row in monitoring/README.md: text-length
-    distribution, rating, source mix, and label distribution. Keeping this tiny
-    and explicit gives Evidently typed numeric + categorical columns to reason
-    about instead of free text it would just ignore. ``text`` is preserved so the
-    gate can also score a model on the same frame.
-    """
+    # Project raw reviews onto the columns we monitor (the "data drift" row in
+    # monitoring/README.md): text length, rating, source mix, label distribution.
+    # Keeping it tiny and explicit hands Evidently typed numeric + categorical
+    # columns instead of free text it would ignore. text stays on the frame so the
+    # gate can also score a model on it.
     out = pd.DataFrame()
     out["text"] = df["text"].fillna("").astype(str) if "text" in df.columns else ""
     out["text_len"] = out["text"].str.len()
@@ -397,12 +384,9 @@ def _features_from_reviews(df: pd.DataFrame) -> pd.DataFrame:
 def _load_recent_silver(
     silver_root: Path, n_partitions: int
 ) -> Optional[pd.DataFrame]:
-    """Concat the most recent ``n_partitions`` ``review_date=`` silver partitions.
-
-    Returns None when the silver root has no readable partitions yet (fresh
-    stack), so the caller can degrade to the train-vs-itself stub instead of
-    failing the DAG.
-    """
+    # Concat the most recent n_partitions review_date= silver partitions. Returns
+    # None when the silver root has no readable partitions yet (fresh stack), so the
+    # caller can degrade to the train-vs-itself stub instead of failing the DAG.
     if not silver_root or not silver_root.exists():
         return None
 
@@ -430,14 +414,11 @@ def _build_reference_and_current(
     silver_root: Optional[Path] = None,
     n_partitions: int = DRIFT_RECENT_PARTITIONS,
 ) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
-    """Reference = sample/training CSV; current = recent silver partitions.
-
-    Returns ``(reference, current, used_silver)``. When no silver partitions
-    exist yet, ``current`` falls back to a copy of ``reference`` (train vs. itself
-    -> guaranteed-pass gate) and ``used_silver`` is False, preserving the "DAG
-    stays green while wiring settles" property. Both frames are reduced to their
-    shared columns so Evidently sees a matching schema.
-    """
+    # Reference is the sample/training CSV; current is the recent silver partitions.
+    # Returns (reference, current, used_silver). With no silver partitions yet,
+    # current falls back to a copy of reference (train vs itself, so the gate passes)
+    # and used_silver is False, which keeps the DAG green while wiring settles. Both
+    # frames are reduced to their shared columns so Evidently sees a matching schema.
     reference = _features_from_reviews(pd.read_csv(sample_csv))
 
     silver_root = silver_root or DEFAULT_SILVER_ROOT
@@ -456,13 +437,11 @@ def run_drift_check(
     threshold: float = DEFAULT_DRIFT_THRESHOLD,
     silver_root: Optional[Path] = None,
 ) -> DriftResult:
-    """Run the observational drift check and return a structured result.
-
-    ``reference`` is the training/sample distribution; ``current`` is the most
-    recent silver partitions. Falls back to train-vs-itself when no silver data
-    exists yet. Always returns (never raises on Evidently internals) so the
-    every-6h Airflow task stays green while the pipeline is still being wired.
-    """
+    # Run the observational drift check and return a structured result. reference is
+    # the training/sample distribution; current is the most recent silver partitions,
+    # falling back to train-vs-itself when no silver data exists yet. Always returns
+    # (never raises on Evidently internals) so the Airflow task stays green while the
+    # pipeline is still being wired.
     sample_csv = Path(sample_csv) if sample_csv else DEFAULT_SAMPLE_CSV
     if not sample_csv or not sample_csv.exists():
         raise FileNotFoundError(
@@ -503,16 +482,12 @@ def run_drift_check(
         )
 
 
+# Full observational drift summary: data + target + (optional) prediction.
+# target_* and prediction_* are None when the column was unavailable (no label on
+# current, or no model to score). blocked is True when any computed drift is
+# actionable; the monitor DAG reads it to decide whether to alert.
 @dataclass
 class MonitorResult:
-    """Full observational drift summary: data + target + (optional) prediction.
-
-    ``target_*`` and ``prediction_*`` are None when the relevant column was
-    unavailable (no label on current / no model to score). ``blocked`` is True
-    when ANY computed drift is actionable — the monitor DAG uses it to decide
-    whether to fire a retrain.
-    """
-
     report_path: str
     data_drift_score: float = 0.0
     dataset_drift: bool = False

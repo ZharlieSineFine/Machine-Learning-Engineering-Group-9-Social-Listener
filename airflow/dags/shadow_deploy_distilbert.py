@@ -23,7 +23,7 @@ STAGING_STAGE = "Staging"
 
 
 def _require_distilbert_deps() -> None:
-    """Skip the task cleanly when the heavy DL deps aren't in the image."""
+    # Skip cleanly when the heavy DL deps aren't baked into the image.
     try:
         import datasets
         import torch  
@@ -36,10 +36,9 @@ def _require_distilbert_deps() -> None:
 
 
 def _register_staging(out_dir: Path, metrics: dict) -> tuple[str, str | None]:
-    """Log the saved model+tokenizer and transition the new version to Staging.
-    Returns (model_name, version). No-ops (returns version=None) when
-    MLFLOW_TRACKING_URI is unset, matching the other DAGs' offline contract.
-    """
+    # Log the saved model + tokenizer and move the new version to Staging. Returns
+    # (model_name, version), or (model_name, None) when MLFLOW_TRACKING_URI is
+    # unset, which keeps the offline contract the other DAGs use.
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     model_name = os.getenv("DISTILBERT_MODEL_NAME", DEFAULT_MODEL_NAME)
     if not tracking_uri:

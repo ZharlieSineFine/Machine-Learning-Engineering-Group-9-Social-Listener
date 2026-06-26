@@ -1,32 +1,9 @@
-"""Batch inference — score reviews with the champion model and write the predictions
-into the Postgres ``reviews`` table the dashboard reads.
+"""Score reviews with the champion model and write predictions to the Postgres
+``reviews`` table the dashboard reads.
 
-Two entry points share the same scoring + write logic:
-
-  * :func:`run_on_silver` — **production**. Scores the medallion's freshly-built
-    silver window (the ``batch_inference`` DAG calls this, Dataset-triggered after
-    the medallion publishes).
-  * :func:`run` — **offline demo / tests**. Scores a replay window from the replay
-    simulator. Kept for the demo scripts + unit tests.
-
-The inference step, either way:
-
-    reviews (text)  ->  champion model  ->  predicted label  ->  reviews table  ->  dashboard
-
-The champion (``models/artifacts/baseline.pkl``, TF-IDF + LogReg) was trained on
-integer classes (0=negative, 1=neutral, 2=positive). We map those back to the
-string labels the dashboard + GE suite expect, and apply the champion's tuned
-negative threshold (0.46) so the negative class — the one the brand cares about —
-is caught the way the registered champion was tuned to.
-
-CLI:
-    # seed a clean 2-week history (dashboard looks normal)
-    python -m serving.batch_infer --scenario stable --truncate
-
-    # inject "today's" negative-review burst (dashboard spikes + alerts)
-    python -m serving.batch_infer --scenario spike --asof 2026-06-21 --n-recent 1 --as-now
-
-Owner: Charlie + Ha (Data & Eval), wiring Van's champion model into Amelia's dashboard.
+``run_on_silver`` is the production path: the batch_inference DAG calls it after the
+medallion publishes. ``run`` scores a replay window instead, for the demo and tests.
+Both flow text -> champion model -> predicted label -> reviews table -> dashboard.
 """
 from __future__ import annotations
 
@@ -55,7 +32,8 @@ try:
 except Exception:
     pass
 
-# Integer-class -> string-label map (champion pickle predicts ints).
+# Champion (models/artifacts/baseline.pkl, TF-IDF + LogReg) predicts integer
+# classes; map them back to the string labels the dashboard + GE suite expect.
 LABELS = ["negative", "neutral", "positive"]
 ID2LABEL = {0: "negative", 1: "neutral", 2: "positive"}
 
@@ -63,6 +41,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PICKLE = Path(
     os.getenv("MODEL_PICKLE_PATH", str(_REPO_ROOT / "models" / "artifacts" / "baseline.pkl"))
 )
+# Champion's tuned negative threshold: catches the negative class the brand cares about.
 DEFAULT_NEG_THRESHOLD = float(os.getenv("NEG_THRESHOLD", "0.46"))
 REPLAY_SOURCE = "replay"
 
@@ -79,15 +58,15 @@ DEFAULT_SILVER_PARTITIONS = int(os.getenv("BATCH_INFER_SILVER_PARTITIONS", "1"))
 # Model + prediction (pure)
 # ---------------------------------------------------------------------------
 def load_model(pickle_path: Path = DEFAULT_PICKLE):
-    """Load the champion pipeline pickle (raw sklearn Pipeline)."""
-    import models.baseline_sklearn  # noqa: F401 — registers the pickled preprocessor symbol
+    # Load the champion pipeline pickle (a raw sklearn Pipeline).
+    import models.baseline_sklearn  # noqa: F401 (registers the pickled preprocessor symbol)
 
     with open(pickle_path, "rb") as fh:
         return pickle.load(fh)
 
 
 def _resolve_label(raw) -> str:
-    """Map a model output (int class id or string) to a canonical label."""
+    # Map a model output (int class id or string) to a canonical label.
     if isinstance(raw, str) and raw in LABELS:
         return raw
     try:
@@ -104,13 +83,9 @@ def _neg_index(classes: list) -> Optional[int]:
 
 
 def predict_labels(pipe, texts: List[str], neg_threshold: float = DEFAULT_NEG_THRESHOLD) -> List[str]:
-    """Predict string labels, applying the champion's tuned negative threshold.
-
-    If ``predict_proba`` is available, a row is labelled ``negative`` when
-    P(negative) >= ``neg_threshold`` (the champion was tuned to 0.46); otherwise
-    the argmax of the remaining classes wins. Falls back to plain ``predict`` for
-    models without probabilities.
-    """
+    # Label a row negative when P(negative) >= neg_threshold (champion tuned to
+    # 0.46); otherwise take the argmax of the other classes. Falls back to plain
+    # predict when the model has no predict_proba.
     texts = [str(t) for t in texts]
     classes = list(getattr(pipe, "classes_", []))
     if neg_threshold and hasattr(pipe, "predict_proba") and classes:
@@ -134,7 +109,7 @@ def predict_labels(pipe, texts: List[str], neg_threshold: float = DEFAULT_NEG_TH
 # Write to the reviews table (what the dashboard reads)
 # ---------------------------------------------------------------------------
 def _ingested_at_series(df: pd.DataFrame, as_now: bool) -> List:
-    """Resolve each row's ingested_at: 'now' (today's burst) or the review_date."""
+    # ingested_at is 'now' for today's burst, else the row's own review_date.
     if as_now:
         now = datetime.now(timezone.utc)
         return [now] * len(df)
@@ -145,7 +120,7 @@ def _ingested_at_series(df: pd.DataFrame, as_now: bool) -> List:
 
 
 def write_reviews(conn, df: pd.DataFrame, labels: List[str], *, as_now: bool, source: str = REPLAY_SOURCE) -> int:
-    """Insert scored rows into ``reviews`` (text, label, source, ingested_at)."""
+    # Insert scored rows into reviews (text, label, source, ingested_at).
     from psycopg2.extras import execute_values
 
     ingested = _ingested_at_series(df, as_now)
@@ -173,7 +148,7 @@ def truncate_reviews(conn) -> None:
 
 
 def clear_recent_reviews(conn, days: int = 1) -> int:
-    """Delete the most recent ``days`` of reviews so a fresh 'today' batch stands alone."""
+    # Drop the most recent `days` of reviews so a fresh 'today' batch stands alone.
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM reviews WHERE ingested_at >= NOW() - make_interval(days => %s)",
@@ -188,11 +163,9 @@ def clear_recent_reviews(conn, days: int = 1) -> int:
 # Orchestration
 # ---------------------------------------------------------------------------
 def _shift_to_today(df: pd.DataFrame, end: Optional[date] = None) -> pd.DataFrame:
-    """Shift review_date so the window's last day lands on ``end`` (default: today).
-
-    Keeps the day-to-day shape (the demo data lives in mid-2026) but anchors the
-    series to "now" so the dashboard's recent-window query and timeline look live.
-    """
+    # Shift review_date so the window's last day lands on `end` (default today).
+    # Keeps the day-to-day shape (demo data is mid-2026) but anchors the series to
+    # "now" so the dashboard's recent-window query and timeline look live.
     end = end or datetime.now(timezone.utc).date()
     out = df.copy()
     dts = pd.to_datetime(out["review_date"], errors="coerce")
@@ -215,10 +188,8 @@ def run(
     pickle_path: Path = DEFAULT_PICKLE,
     pg: Optional[PostgresConfig] = None,
 ) -> dict:
-    """Score a replay window and write predictions into ``reviews``.
-
-    Returns a summary dict (rows written + predicted label distribution).
-    """
+    # Score a replay window and write predictions into reviews. Returns a summary
+    # dict (rows written + predicted label distribution).
     pg = pg or PostgresConfig.from_env()
     if pg is None:
         raise RuntimeError("Postgres not configured — set POSTGRES_* env vars")
@@ -263,18 +234,11 @@ def run_on_silver(
     silver_root: Optional[Path] = None,
     pg: Optional[PostgresConfig] = None,
 ) -> dict:
-    """Production batch inference — score the medallion's freshly-built silver window.
-
-    Reads the most recent ``n_partitions`` ``review_date=`` silver partitions (the
-    real reviews the medallion just ingested), scores them with the champion model,
-    and writes the predictions into the ``reviews`` table the dashboard reads. This is
-    the production read-side step; it replaces the replay-driven :func:`run`, which
-    stays for the offline demo + tests.
-
-    Mirrors :func:`run`'s write semantics: ``clear_today`` refreshes only the most
-    recent day and ``as_now`` stamps the rows "now", so multi-day history is preserved
-    while today's batch is rescored. Returns the same summary shape.
-    """
+    # Production read-side: read the most recent n_partitions review_date= silver
+    # partitions (the reviews the medallion just ingested), score them, and write the
+    # predictions into reviews. clear_today refreshes only the most recent day and
+    # as_now stamps the rows "now", so multi-day history survives while today's batch
+    # is rescored. Same summary shape as run().
     pg = pg or PostgresConfig.from_env()
     if pg is None:
         raise RuntimeError("Postgres not configured — set POSTGRES_* env vars")
