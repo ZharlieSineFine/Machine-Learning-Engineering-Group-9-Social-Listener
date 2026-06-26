@@ -127,7 +127,7 @@ Phase 1 (MVP skeleton)  ──►  Phase 2 (depth)  ──►  Phase 3 (polish +
 
 ### Phase 2 Definition of Done
 - [ ] DistilBERT beats baseline on held-out F1 in MLflow
-- [ ] Drift report runs every 6h and is visible in the dashboard
+- [ ] Drift report runs per batch (after inference) and is visible in the dashboard
 - [ ] A poisoned batch (via replay simulator) actually trips the gate and triggers retraining
 - [ ] Shadow lane produces N hours of paired Production/Staging predictions before promotion
 - [ ] A human correction in the dashboard appears in the next training run's label set

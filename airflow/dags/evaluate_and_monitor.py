@@ -10,9 +10,15 @@ if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from airflow import DAG
+from airflow.datasets import Dataset
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 
 MONITORING_BUCKET = "monitoring"
+
+# Data-aware schedule: batch_inference emits this Dataset once fresh predictions land,
+# so drift is checked per batch, right after inference (not on an independent clock).
+# Keyed by URI, so this string MUST match the outlet in airflow/dags/batch_inference.py.
+REVIEWS_PREDICTIONS_DATASET = Dataset("postgres://app/reviews")
 
 
 def _minio_client():
@@ -167,9 +173,9 @@ def _task_send_alert(**context) -> None:
 
 with DAG(
     dag_id="evaluate_and_monitor",
-    description="Pure-observation Evidently drift monitor → monitoring_reports + alert (no retrain)",
+    description="Pure-observation Evidently drift monitor → monitoring_reports + alert (no retrain); data-triggered per batch off batch_inference",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *", 
+    schedule=[REVIEWS_PREDICTIONS_DATASET],  # per batch: runs when batch_inference lands fresh predictions
     catchup=False,
     default_args={
         "owner": "data",

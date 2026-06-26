@@ -5,9 +5,9 @@
 Evidently runs inside Airflow as a Python lib (no standalone service). It lives in
 two places, both backed by `monitoring/drift_checks.py`:
 
-- **`evaluate_and_monitor`** (every 6h) — observational drift on live data; a
-  read-only observer that writes a report and, when drift blocks the gate,
-  **fires an alert** (no auto-retrain — see below).
+- **`evaluate_and_monitor`** (per batch, data-triggered off `batch_inference`) —
+  observational drift on live data; a read-only observer that writes a report and,
+  when drift blocks the gate, **fires an alert** (no auto-retrain — see below).
 - **`medallion_pipeline` → `gate`** task — the promotion gate; runs between
   `train` and `promote` and **blocks promotion** of a regressed model.
 
