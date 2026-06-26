@@ -1,9 +1,4 @@
-"""Unit tests for the RAW Yelp Bronze adapter (data/ingest/yelp_loader.py).
-
-Bronze must be a faithful copy of the source: raw fields verbatim, the `date` passed through
-untouched, provenance appended, and NO label/join/cleaning (those are Silver's job and are
-tested in test_build_silver_unit.py). Category scoping is pure row selection.
-"""
+#Unit tests for the RAW Yelp Bronze adapter (data/ingest/yelp_loader.py).
 from __future__ import annotations
 
 import pandas as pd

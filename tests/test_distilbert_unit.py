@@ -1,11 +1,4 @@
-"""Unit tests for models/distilbert_finetune.py — fast, no model download.
-
-We verify the things we can verify without actually fine-tuning DistilBERT:
-  * label maps are consistent (LABEL2ID <-> ID2LABEL roundtrip).
-  * `_encode_dataset` produces torch-formatted tensors of the right shape.
-  * `_compute_metrics` returns macro-F1 + accuracy in [0, 1].
-  * `train_distilbert` rejects DataFrames missing required columns.
-  * `TrainConfig` defaults match what the DAG expects.
+"""Unit tests for models/distilbert_finetune.py.
 
 The end-to-end "does it actually train" test is `tests/test_distilbert_slow.py`
 and is gated by `RUN_SLOW=1` (or `pytest -m slow`).

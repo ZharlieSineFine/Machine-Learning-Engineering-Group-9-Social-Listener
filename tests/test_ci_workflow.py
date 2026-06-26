@@ -1,14 +1,4 @@
-"""Validate the GitHub Actions CI workflow.
-
-We can't actually run CI from a unit test, but we CAN:
-  * parse the YAML
-  * assert it has all three jobs we expect
-  * assert it only references files that actually exist
-  * assert ruff is pinned (so the lint version stays reproducible)
-
-This catches the common drift: someone removes a requirements file and
-forgets the CI step that references it.
-"""
+#Validate the GitHub Actions CI workflow.
 from __future__ import annotations
 
 from pathlib import Path

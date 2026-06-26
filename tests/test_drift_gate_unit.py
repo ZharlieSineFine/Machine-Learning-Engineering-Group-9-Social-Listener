@@ -21,8 +21,6 @@ from monitoring.drift_checks import (
 )
 
 
-# --- fakes -----------------------------------------------------------------
-
 class FakeMinIO:
     def __init__(self):
         self.uploads = []
@@ -66,7 +64,6 @@ class StubModel:
         return [self.label] * len(texts)
 
 
-# --- helpers ---------------------------------------------------------------
 
 def _df(rows):
     return pd.DataFrame(rows, columns=["text", "label", "rating", "source"])
@@ -85,7 +82,6 @@ def _balanced(n: int, label_seed: str = None) -> pd.DataFrame:
     return _df(rows)
 
 
-# --- tests -----------------------------------------------------------------
 
 def test_compute_model_f1_perfect_predictor():
     df = _balanced(30)

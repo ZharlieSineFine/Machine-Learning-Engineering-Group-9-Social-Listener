@@ -1,9 +1,5 @@
-"""Unit tests for the replay -> drift wiring in monitoring/drift_checks.py.
+#Unit tests for the replay -> drift wiring in monitoring/drift_checks.py.
 
-The window-selection + frame-building logic is tested without Evidently; the full
-Evidently run (run_replay_monitor) is gated on evidently being importable, so it
-runs in the monitoring env / CI and skips cleanly elsewhere.
-"""
 from __future__ import annotations
 
 import pandas as pd

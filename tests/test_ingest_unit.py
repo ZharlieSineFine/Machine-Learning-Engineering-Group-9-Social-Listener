@@ -1,7 +1,5 @@
-"""Unit tests for the pure ingestion functions.
+#Unit tests for the pure ingestion functions.
 
-No DB, no Airflow. Just validates the transform logic.
-"""
 from __future__ import annotations
 
 from pathlib import Path

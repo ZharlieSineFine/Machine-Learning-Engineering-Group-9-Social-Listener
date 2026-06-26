@@ -5,7 +5,7 @@ mlflow) to be running. Bring it up with `scripts/up.sh` or:
     docker compose up -d postgres minio minio-init mlflow
 
 If services aren't reachable, the fixtures fail with a clear message rather
-than silently skipping — we deliberately chose "Require Docker" mode.
+than silently skipping.
 """
 from __future__ import annotations
 

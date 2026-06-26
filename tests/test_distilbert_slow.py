@@ -1,17 +1,5 @@
-"""Slow but real DistilBERT fine-tuning smoke test.
+#Slow but real DistilBERT fine-tuning smoke test.
 
-Marked `@pytest.mark.slow` — skipped by default. Run with:
-    RUN_SLOW=1 pytest tests/test_distilbert_slow.py -v
-    # or
-    pytest -m slow tests/test_distilbert_slow.py -v
-
-What this proves:
-    - The training path actually executes end-to-end on real DistilBERT
-      weights — no crash from a mismatched tokenizer/config/arg combo.
-    - The saved directory roundtrips through `predict([text])`.
-    - The first run downloads ~250 MB of weights; subsequent runs hit
-      the HF cache and finish in ~30s on a laptop CPU.
-"""
 from __future__ import annotations
 
 from pathlib import Path

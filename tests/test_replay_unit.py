@@ -1,7 +1,7 @@
 """Unit tests for the replay simulator (data/ingest/replay.py).
 
 The simulator replays a pre-built demo_data scenario (stable / spike) as a BrewLeaf
-operational stream. Pure cores only — no demo CSVs on disk required (tests write their own).
+operational stream.
 """
 from __future__ import annotations
 

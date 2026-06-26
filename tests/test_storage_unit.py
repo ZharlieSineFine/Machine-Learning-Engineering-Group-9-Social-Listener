@@ -18,9 +18,6 @@ from data.storage.warehouse import (
 )
 import data.publish as publish
 
-
-# ---------- config ----------
-
 def test_postgres_config_from_env_and_dsn():
     env = {"POSTGRES_USER": "u", "POSTGRES_PASSWORD": "p", "POSTGRES_DB": "d",
            "POSTGRES_HOST": "h", "POSTGRES_PORT": "5433"}
@@ -41,8 +38,6 @@ def test_s3_config_from_env():
     assert cfg.endpoint_url == "http://minio:9000" and cfg.access_key == "a"
     assert S3Config.from_env({"AWS_ACCESS_KEY_ID": "a"}) is None
 
-
-# ---------- warehouse helpers ----------
 
 def test_silver_table_frame_renames_to_table_columns():
     df = pd.DataFrame({"source": ["y"], "source_id": ["r"], "text": ["t"], "text_len": [1],
@@ -99,15 +94,11 @@ def test_table_column_constants_are_stable():
     assert GOLD_TABLE_COLUMNS == ["review_id", "review_date", "text", "label", "label_source", "text_len"]
 
 
-# ---------- objectstore ----------
-
 def test_to_key_joins_forward_slashes():
     assert to_key("silver/reviews", "review_date=2020-01-01", "part.parquet") == \
         "silver/reviews/review_date=2020-01-01/part.parquet"
     assert to_key("bronze", "", "x.csv") == "bronze/x.csv"
 
-
-# ---------- publish reads (tmp parquet round-trip) ----------
 
 def test_read_silver_concats_partitions(tmp_path):
     p = tmp_path / "review_date=2020-01-01"
@@ -139,8 +130,6 @@ def test_publish_run_is_noop_without_env():
     out = publish.publish_run(["2020-01-01"], "2026-06-21", env={})
     assert out == {"published_minio": None, "published_postgres": None}
 
-
-# ---------- object-store mirroring (fake S3 client, no MinIO needed) ----------
 
 class _FakeS3:
     """Minimal stand-in for a boto3 S3 client: records uploads, fakes bucket existence."""
