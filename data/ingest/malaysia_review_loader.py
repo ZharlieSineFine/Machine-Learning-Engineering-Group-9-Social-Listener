@@ -1,26 +1,10 @@
 """Malaysia TripAdvisor source adapter — RAW Bronze ingestion (no transformation).
 
-Bronze = the export's own columns, verbatim, plus provenance. This adapter does NO label
-derivation, NO date reformatting, NO rating coercion, NO text cleaning, NO row dropping for
-bad values — all of that is the Silver refiner's job (`data/refine/build_silver.py`).
-
-Rows are *selected* to the beverage segment (a sourcing scope, configurable) but their
-values are never modified, so the Bronze `Dates` column keeps the literal
-"Reviewed 6 February 2022" string straight from the export, and `Rating`/`Review` are
-untouched.
-
-Why a name filter? The cleaned TripAdvisor export has no `categories` field — only
-`Author, Title, Review, Rating, Dates, Restaurant, Location`. BrewLeaf is a bubble-tea
-brand, so to mirror the Yelp beverage slice we keep reviews whose *restaurant name* looks
-like a beverage shop (coffee / tea / café / kopitiam / bubble tea / juice + a few SEA
-chains). Override with `--keywords`, or ingest everything with `--no-filter`.
-
 Run:
     python -m data.ingest.malaysia_review_loader \\
         --in "Malaysia Restaurant Review Datasets/data_cleaned/TripAdvisor_data_cleaned.csv" \\
         --out data/bronze/tripadvisor/reviews.csv
 
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 

@@ -1,7 +1,5 @@
 # API — FastAPI Serving Layer
 
-**Owner:** Amelia
-
 A REST service that loads the `Production` model from the MLflow registry and exposes `/predict`.
 
 ## Endpoints (target)

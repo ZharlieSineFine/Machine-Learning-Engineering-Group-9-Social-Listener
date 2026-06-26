@@ -1,22 +1,3 @@
-"""MLOps Monitor — Social Listener · Group 9.
-
-Data scientist view: model health, shadow deploy comparison,
-MLflow run history, pipeline stats, and drift signals.
-
-Sits alongside dashboard/app.py. Add it as a Streamlit page by placing
-this file under dashboard/pages/mlops_monitor.py — Streamlit's multi-page
-routing picks it up automatically.
-
-Data sources:
-    - MLflow registry/runs  → scripts/compare_mlflow_models.py helpers
-    - Shadow log            → GET /shadow/log  (api/app/shadow.py)
-    - Drift signal          → monitoring_reports table (written by evaluate_and_monitor),
-                              live monitoring/drift_checks.run_drift_check() fallback
-    - Pipeline stats        → TODO: Airflow XCom / summary JSON from Charlie/Ha
-    - Correction queue      → TODO: predictions table from Charlie/Ha
-
-Owner: Amelia.
-"""
 from __future__ import annotations
 
 import json
@@ -31,16 +12,10 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Path wiring — same pattern as app.py
-# ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]   # repo root when file is at dashboard/pages/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# ---------------------------------------------------------------------------
-# Constants — palette matches the marketing dashboard exactly
-# ---------------------------------------------------------------------------
 TEAL      = "#1D9E75"
 RED       = "#E24B4A"
 AMBER     = "#EF9F27"
@@ -57,9 +32,6 @@ API_URL   = os.getenv("API_URL", "http://localhost:8000")
 # the number shown is the share of drifted columns (a magnitude, not the gate).
 DRIFT_PSI_THRESHOLD = float(os.getenv("DRIFT_PSI_THRESHOLD", "0.25"))
 
-# ---------------------------------------------------------------------------
-# Page config + CSS
-# ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="MLOps Monitor · Social Listener",
     page_icon="🔬",
@@ -101,10 +73,6 @@ h1, h2, h3  {{ color: {TEXT_PRI} !important; }}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# Shared HTML helpers  (same style as app.py)
-# ---------------------------------------------------------------------------
-
 def _card(html: str, padding: str = "1rem 1.2rem") -> None:
     st.markdown(
         f'<div style="background:{CARD_BG};border:1px solid {BORDER};'
@@ -136,19 +104,8 @@ def _todo_placeholder(message: str) -> str:
         f'</div>'
     )
 
-
-# ---------------------------------------------------------------------------
-# Data fetchers
-# ---------------------------------------------------------------------------
-
 def _runs_from_checkpoints() -> pd.DataFrame:
-    """Fallback: static metrics extracted from trainer_state.json checkpoint files.
-    Used when MLflow is unreachable or has no registered runs yet.
-    These are Van's real training runs — best checkpoint per run, sorted by accuracy.
-    F1 neg / recall neg are not available in trainer_state (MLflow only).
 
-    To update: re-extract from checkpoints/distilbert-sentiment/*/trainer_state.json.
-    """
     _CHECKPOINT_RUNS = [
         # run_name                         best_metric  f1_macro   checkpoint  status
         ("distilbert-baseline",            0.8991,      0.7870,    "8604",     "production"),

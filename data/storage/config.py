@@ -11,8 +11,6 @@ so override `POSTGRES_HOST=localhost` and `MLFLOW_S3_ENDPOINT_URL=http://localho
 
 `from_env` returns None when the required vars are absent, so callers can degrade gracefully
 (e.g. skip publishing / skip integration tests) instead of crashing.
-
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 

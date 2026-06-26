@@ -1,4 +1,3 @@
-#DistilBERT fine-tuning for 3-class sentiment (Phase 2); saves weights + tokenizer to a dir MLflow can pick up.
 from __future__ import annotations
 
 import argparse
@@ -27,13 +26,6 @@ class TrainConfig:
     learning_rate: float = 5e-5
     batch_size: int = 16
     seed: int = 42
-
-    # TODO (member, Phase 2): tune these.
-    #   - try `distilbert-base-multilingual-cased` for Malay reviews
-    #   - early stopping via EarlyStoppingCallback
-    #   - linear warmup + cosine schedule
-    #   - mixed precision (fp16=True) on GPU
-    #   - weight_decay + grad_accumulation
 
 
 @dataclass

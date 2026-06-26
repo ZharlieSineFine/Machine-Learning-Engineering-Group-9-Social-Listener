@@ -1,10 +1,5 @@
 """One-off: replace competitor brand names in the demo review CSVs with "BrewLeaf".
 
-The demo reviews are real Yelp/TripAdvisor beverage reviews, so they name
-Starbucks / McDonald's / Dunkin / etc. On the dashboard those names break
-immersion — the audience sees a competitor on the "BrewLeaf" brand monitor.
-This rewrites the ``text`` column of the demo CSVs in place.
-
 Safe by construction:
   * whole-word matches only (``\\b``) — never touches "pretty", "interpret", etc.
   * bare "Costa" is intentionally NOT replaced (reviewers say "Costa Rica" for the
@@ -13,7 +8,6 @@ Safe by construction:
 
 Run from the repo root:  python scripts/rebrand_demo_data.py
 
-Owner: Charlie (Data & Eval).
 """
 from __future__ import annotations
 

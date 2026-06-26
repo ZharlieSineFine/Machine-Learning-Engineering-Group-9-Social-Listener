@@ -1,7 +1,4 @@
 # Dashboard — Streamlit
-
-**Owner:** Amelia
-
 A single-page Streamlit app that surfaces what the system is doing right now.
 
 ## Sections (target)

@@ -1,7 +1,5 @@
 # Monitoring — Drift & Performance
 
-**Owner:** Charlie + Ha
-
 Evidently runs inside Airflow as a Python lib (no standalone service). It lives in
 two places, both backed by `monitoring/drift_checks.py`:
 

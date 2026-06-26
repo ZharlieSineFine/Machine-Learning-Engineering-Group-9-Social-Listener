@@ -1,17 +1,5 @@
-"""Model loading — tries MLflow registry first, falls back to a local pickle.
+#Model loading — tries MLflow registry first, falls back to a local pickle.
 
-Order of resolution:
-    1. If MLFLOW_TRACKING_URI and MODEL_NAME are set, pull
-       `models:/<MODEL_NAME>/<MODEL_STAGE>` from the registry.
-    2. Otherwise, load the pickle at MODEL_PICKLE_PATH (defaults to the
-       smoke-test artifact written by models/train.py).
-
-Keeping the fallback means the API container can boot in the smoke test
-without MLflow being up. Production deployments should always go through
-the registry path.
-
-Owner: Amelia.
-"""
 from __future__ import annotations
 
 import os
@@ -33,30 +21,18 @@ class LoadedModel:
 
 
 def _try_mlflow() -> Optional[LoadedModel]:
-    """Pull `models:/<MODEL_NAME>/<MODEL_STAGE>` from the MLflow registry.
 
-    Returns None (caller falls back to the local pickle) when MLflow isn't
-    configured OR the model isn't in the registry yet (nothing promoted) — so the
-    API still boots for the demo instead of crash-looping on an empty registry.
-    """
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     model_name = os.getenv("MODEL_NAME")
     if not (tracking_uri and model_name):
         return None
 
-    # TODO (member, Phase 2): when DistilBERT (or any non-sklearn model) is
-    # registered, switch to `mlflow.pyfunc.load_model` and adapt the call
-    # site in main.py to handle DataFrame input. For Phase 1 sklearn, the
-    # `mlflow.sklearn` loader returns the raw Pipeline — identical interface
-    # to the pickle fallback, so `pipe.predict([text])` works either way.
     import mlflow
     import mlflow.sklearn
 
     mlflow.set_tracking_uri(tracking_uri)
     stage = os.getenv("MODEL_STAGE", "Production")
-    # TODO (member): MLflow 2.9+ deprecated stages in favour of *aliases*.
-    # When bumping to MLflow >=3, switch to `models:/sentiment-baseline@production`
-    # and have the training DAG set the alias instead of transitioning stages.
+
     uri = f"models:/{model_name}/{stage}"
     try:
         pipe = mlflow.sklearn.load_model(uri)
@@ -83,12 +59,7 @@ def load_model() -> Optional[LoadedModel]:
     return None
 
 def load_staging_model() -> Optional[LoadedModel]:
-    """Load the Staging model from MLflow, if one exists.
 
-    Returns None if MLflow isn't configured or no Staging model exists.
-    Unlike load_model(), this never falls back to pickle — a missing
-    Staging model is normal (not an error).
-    """
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     model_name = os.getenv("MODEL_NAME")
     if not (tracking_uri and model_name):

@@ -1,16 +1,5 @@
-"""Postgres warehouse for the Silver/Gold medallion tables.
+#Postgres warehouse for the Silver/Gold medallion tables.
 
-Carries self-contained DDL (`ensure_schema`) so the layer works even if the container's
-`init.sql` wasn't applied, plus idempotent upserts keyed on the pipeline's natural keys:
-
-    reviews_silver   PK (source, source_id)        -- harmonised, deduped; NO labels
-    reviews_gold     PK (review_id)                 -- review_id == silver source_id; carries label
-    human_corrections                               -- feedback loop (Phase 2)
-
-Upserts use `ON CONFLICT ... DO UPDATE`, so re-publishing a partition is safe.
-
-Owner: Charlie + Ha (Data & Eval).
-"""
 from __future__ import annotations
 
 from contextlib import contextmanager

@@ -2,7 +2,6 @@
 
 Handoff doc for teammates (modeling, eval, and data consumers). Describes the **Bronze → Silver → Gold** medallion layout, column contracts from code (`data/ingest/ingest_reviews.py`), and dtypes observed on disk.
 
-**Owner:** Charlie + Ha (Data & Eval)  
 **Snapshot:** `run_date=2026-06-06`, default **3-year** Silver scope per source
 
 ---

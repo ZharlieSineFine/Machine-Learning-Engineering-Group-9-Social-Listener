@@ -1,18 +1,3 @@
-"""Streamlit dashboard — Phase 2 with depth.
-
-Sections (top to bottom):
-    1. 4 KPI tiles  (total posts, % positive, % negative, % neutral)
-    2. Sentiment timeline (line chart)
-    3. Alerts panel  (recent negative posts, left-bordered cards)
-    4. Topic breakdown  (placeholder — Phase 2 stretch goal)
-    5. Word cloud  (top words in negative reviews)
-    6. Live prediction probe (for testing if dashboard works)
-
-Owner: Amelia.
-
-Run locally:
-    streamlit run dashboard/app.py
-"""
 from __future__ import annotations
  
 import os
@@ -40,10 +25,6 @@ from data import (
     negative_word_counts,
     sentiment_timeline,
 )
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
  
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 NEGATIVE_THRESHOLD = 25   # % — spike warning triggers when the latest batch exceeds this
@@ -64,10 +45,6 @@ BORDER     = "#2E3039"
 TEXT_PRI   = "#E8E6DF"
 TEXT_SEC   = "#888780"
  
- 
-# ---------------------------------------------------------------------------
-# Page config + global CSS
-# ---------------------------------------------------------------------------
  
 st.set_page_config(
     page_title="BrewLeaf · Brand Sentiment",
@@ -149,10 +126,7 @@ p, li, span {{ color: {TEXT_PRI}; }}
 h1, h2, h3 {{ color: {TEXT_PRI} !important; }}
 </style>
 """, unsafe_allow_html=True)
- 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+
  
 def _pct(df: pd.DataFrame, label: str) -> float:
     if df.empty:
@@ -183,9 +157,6 @@ def _section_title(icon: str, title: str) -> str:
         f'{icon}&nbsp;&nbsp;{title}</p>'
     )
 
-# ---------------------------------------------------------------------------
-# Load data (cached so Streamlit doesn't reload on every interaction)
-# ---------------------------------------------------------------------------
  
 def _auto_refresh(interval_ms: int = 5000) -> None:
     """Auto-rerun every few seconds so a freshly-ingested batch shows up live during
@@ -214,10 +185,7 @@ def _load(days: int) -> pd.DataFrame:
         gold_root=DEFAULT_GOLD_ROOT,
         days=days,
     )
- 
-# ---------------------------------------------------------------------------
-# Section renderers
-# ---------------------------------------------------------------------------
+
  
 
 def render_nav(active: str = "marketing") -> None:

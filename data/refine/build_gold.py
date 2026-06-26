@@ -16,7 +16,6 @@ Run (partitioned):
 Run (legacy CSV):
     python -m data.refine.build_gold --silver data/silver/reviews.csv --out data/gold/reviews.csv
 
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 
