@@ -1,27 +1,10 @@
 """Yelp source adapter — RAW Bronze ingestion from the Yelp Open Dataset.
 
-Bronze = the source's own records, verbatim, plus provenance. This adapter does NO join,
-NO label derivation, NO cleaning. It emits two raw tables exactly as they appear in the
-Yelp JSON, *selected* to the beverage business segment (a sourcing decision — BrewLeaf is a
-bubble-tea brand; see the proposal deck):
-
-    reviews.csv   <- review_id, user_id, business_id, stars, useful, funny, cool, text, date
-    business.csv  <- business_id, name, address, city, state, postal_code, stars, review_count, categories
-
-Both get `_source` + `_ingested_at` provenance columns. The review `date` is the literal
-Yelp timestamp ("2018-07-07 22:09:11") copied straight through — never reformatted. The
-join (review.business_id -> business.name/city), label derivation, and any cleaning all live
-in the Silver refiner (`data/refine/build_silver.py`).
-
-review.json is multi-GB, so it is streamed line-by-line — or straight out of the ~9 GB tar
-via `--from-tar` (`tarfile.extractfile`, nothing hits disk). Only the small beverage-business
-index is held in memory.
-
 Run:
     python -m data.ingest.yelp_loader --from-tar /path/to/yelp_dataset --out-dir data/bronze/yelp
     python -m data.ingest.yelp_loader --reviews review.json --business business.json --out-dir data/bronze/yelp
 
-Owner: Charlie + Ha (Data & Eval).
+
 """
 from __future__ import annotations
 

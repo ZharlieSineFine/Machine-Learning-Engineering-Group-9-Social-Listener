@@ -25,8 +25,8 @@ from data.refine.build_silver import refine_yelp, silver_partition_path, write_s
 def _silver_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "text": ["great", "ok", "bad"],
-            "text_len": [5, 2, 3],
+            "text": ["great food", "decent spot", "awful place"],
+            "text_len": [10, 11, 11],
             "rating": [5.0, 3.0, 1.0],
             "source": ["yelp", "yelp", "yelp"],
             "source_id": ["r1", "r2", "r3"],

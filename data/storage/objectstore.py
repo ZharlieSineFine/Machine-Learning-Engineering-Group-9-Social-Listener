@@ -1,15 +1,5 @@
-"""MinIO / S3 object store for the medallion `datasets` bucket.
+#MinIO / S3 object store for the medallion `datasets` bucket.
 
-Mirrors the local medallion trees to S3 under stable prefixes:
-
-    data/bronze/<source>/dt=.../{reviews,business}.csv  -> s3://datasets/bronze/<source>/dt=.../...
-    data/silver/reviews/review_date=.../part.parquet     -> s3://datasets/silver/reviews/review_date=.../...
-    data/gold/{feature_store,label_store}/review_date=... -> s3://datasets/gold/...
-
-Keys mirror the local relative paths, so the S3 layout matches the on-disk Hive partitions.
-
-Owner: Charlie + Ha (Data & Eval).
-"""
 from __future__ import annotations
 
 from pathlib import Path

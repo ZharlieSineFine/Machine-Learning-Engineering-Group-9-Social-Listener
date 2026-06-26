@@ -1,30 +1,9 @@
 """Replay simulator — replays a pre-built demo window as a BrewLeaf operational stream.
 
-The drift / monitoring demo uses purpose-built windows in `demo_data/` (project root). Both
-demo versions cover the same June-2026 window (2026-06-07 -> 2026-06-24) with the same 2,056
-reviews and identical *overall* label mix — only the **timing of negatives** differs:
-
-    demo_jun2026_stable.csv   negatives steady at ~19-20%/day            -> drift gate PASSES
-    demo_jun2026_spike.csv    ~17-18%/day, then a sudden 60% on          -> drift gate FIRES
-                              2026-06-21 (a one-day complaint spike)
-    demo_holdout_full.csv     the full 2022 holdout the two are drawn from (reference window)
-
-The simulator replays the chosen scenario in `review_date` order (optionally paced) to a
-standalone stream that the Evidently / monitoring step consumes as the "current" window.
-
-These files are already in the final contract shape (`text, label, review_date`) and have no
-shop-name column, so — unlike the earlier Gold-sourced version — there is **no brand-name
-replacement** (nothing to key on) and **no synthetic drift injection** (the spike is baked
-into `demo_jun2026_spike.csv`). The text is replayed verbatim.
-
-Output stream columns: review_id (deterministic), review_date, text, label, source="replay",
-scenario, brand="BrewLeaf". Written as `<out>/<scenario>/review_date=YYYY-MM-DD/part.parquet`.
-
 Run:
     python -m data.ingest.replay --scenario spike
     python -m data.ingest.replay --scenario stable --speed 4   # ~4 days/sec to watch it arrive
 
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 
