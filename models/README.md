@@ -1,7 +1,5 @@
 # Models — Training & Experimentation
 
-**Owner:** Van (lead), Amelia (pair)
-
 All training code lives here. Notebooks are for exploration only and don't run in CI.
 
 ## Files
@@ -41,6 +39,3 @@ split degrades to a plain stratified train/val/test (OOT empty). Defaults: `oot_
 - **Registered model name:** `sentiment-baseline` (phase 1), `sentiment-distilbert` (phase 2)
 
 If a metric name changes, update the Evidently config and the dashboard query in the same PR.
-
-## Phase 1 stub
-`train.py` should be runnable as `python -m models.train --quick` and finish in < 60s on the sample dataset.

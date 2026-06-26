@@ -1,4 +1,4 @@
-#Embedding helpers for the Gold layer (Phase 1 stub: deterministic random vectors; Phase 2 swaps in MiniLM-L6-v2, same 384-d output).
+#Embedding helpers for the Gold layer
 from __future__ import annotations
 
 from typing import Iterable, Sequence, Union
