@@ -51,7 +51,7 @@ def test_timeline_groups_by_day():
     df = _df_with_timestamps(48)  # 2 days worth
     out = sentiment_timeline(df, freq="D")
     assert len(out) == 2
-    assert set(out.columns) == {"period", "n_reviews", "pct_positive", "pct_negative"}
+    assert set(out.columns) == {"period", "n_reviews", "pct_positive", "pct_negative", "pct_neutral"}
     assert out["n_reviews"].sum() == 48
 
 

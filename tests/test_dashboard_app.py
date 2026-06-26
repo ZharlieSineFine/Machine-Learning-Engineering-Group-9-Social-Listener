@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 APP_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
 
 
@@ -20,6 +22,7 @@ def test_dashboard_renders_with_sections_and_tiles(monkeypatch):
     ]:
         monkeypatch.delenv(var, raising=False)
 
+    pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_PATH))
     at.run(timeout=60)

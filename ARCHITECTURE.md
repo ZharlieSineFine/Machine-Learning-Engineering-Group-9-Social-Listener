@@ -169,36 +169,45 @@ mle_project/
 │   ├── app.py
 │   └── pages/                    # KPIs, drift, alerts, digest, model comparison
 ├── models/                       # Training code                 (Van + Amelia)
-│   ├── train.py
-│   ├── evaluate.py
-│   ├── baseline_sklearn.py       # Phase 1
-│   ├── distilbert_finetune.py    # Phase 2
-│   └── embeddings.py             # Used by Gold layer
+│   ├── train.py                  # Entry point: train → log → register
+│   ├── baseline_sklearn.py       # TF-IDF + LogReg champion (Phase 1)
+│   ├── distilbert_finetune.py    # DistilBERT challenger (Phase 2)
+│   ├── embeddings.py             # Used by Gold layer
+│   ├── splits.py                 # train / val / test / OOT split
+│   ├── gold_loader.py            # Joins Gold feature + label stores → training frame
+│   └── promote.py                # Promote an MLflow version → Production (min-F1 gate)
 ├── data/                         # Medallion layers              (Charlie + Ha)
 │   ├── ingest/                   # SOURCES → BRONZE (raw, source-native + provenance)
 │   │   ├── yelp_loader.py        # Yelp tar → dt= partitions (reviews + business)
 │   │   ├── malaysia_review_loader.py  # Malaysia TripAdvisor → dt= partitions
-│   │   └── replay.py             # Replay simulator (demo_data stable/spike)
+│   │   ├── replay.py             # Replay simulator (demo_data stable/spike)
+│   │   └── ingest_reviews.py     # CSV → Postgres seed loader (sample/demo path)
 │   ├── refine/                   # BRONZE → SILVER (join, clean, dedup); Silver → Gold (labels)
 │   │   ├── build_silver.py       # Bronze → review_date= Silver parquet partitions
-│   │   ├── build_gold.py         # Silver → feature_store + label_store partitions
-│   │   ├── dedupe.py
-│   │   └── pii_mask.py
+│   │   └── build_gold.py         # Silver → feature_store + label_store partitions
+│   ├── storage/                  # Persistence clients
+│   │   ├── warehouse.py          # *_silver / *_gold DDL + upserts (Postgres)
+│   │   ├── objectstore.py        # MinIO / S3 read+write
+│   │   └── config.py             # storage config
 │   ├── run_daily.py              # Incremental driver (bronze → silver → GE → gold)
+│   ├── publish.py                # Mirror on-disk medallion → MinIO + Postgres
+│   ├── paths.py                  # Canonical medallion path helpers
 │   ├── expectations/             # Great Expectations suites
 │   ├── schemas/                  # SQL DDL for *_silver, *_gold + Pydantic types
 │   └── sample/                   # Tiny in-repo seed for CI smoke
 ├── monitoring/                   # Evidently drift monitoring (Charlie + Ha)
 │   └── drift_checks.py           # read-only observer; alerts, no auto-retrain
-├── infra/                        # Docker, compose, CI            (Anh)
-│   ├── docker/
-│   └── github-actions/
+├── serving/                      # Batch inference                (Van + Amelia)
+│   └── batch_infer.py            # Champion scores Silver/replay → reviews table
+├── infra/                        # Docker + env                   (Anh)
+│   ├── docker/                   # Per-service Dockerfiles (api, dashboard, mlflow, airflow, postgres, smoke, data-pipeline)
+│   └── .env.example              # Canonical env vars
 ├── tests/                        # Integration                    (Amelia + all)
 ├── notebooks/                    # Exploration (not in CI)
 ├── scripts/                      # bootstrap, demo, reset
+├── .github/workflows/ci.yml      # CI: lint, unit, smoke, integration
 ├── docker-compose.yml
 ├── ARCHITECTURE.md
-├── WORKFLOW.md
 └── README.md
 ```
 
@@ -210,11 +219,12 @@ mle_project/
 |---|---|---|---|
 | `postgres` | 5432 | default | — |
 | `minio` + `minio-init` | 9000 / 9001 | default | — |
-| `mlflow` | 5000 | default | postgres, minio-init |
+| `mlflow` | 5001 → 5000 | default | postgres, minio-init |
 | `airflow-init` / `webserver` / `scheduler` | 8080 | default | postgres |
 | `api` | 8000 | default | mlflow |
 | `dashboard` | 8501 | default | api, postgres |
 | `smoke` | — | `smoke` (opt-in) | — |
+| `data-pipeline` | — | `pipeline` (opt-in) | postgres, minio-init |
 
 `docker compose up` brings the default stack online.
 `docker compose run --rm smoke` runs the isolated smoke test container.
