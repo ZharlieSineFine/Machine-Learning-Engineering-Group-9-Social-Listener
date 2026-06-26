@@ -52,9 +52,7 @@ DEFAULT_BUCKET = "monitoring"
 DRIFT_THRESHOLD = DEFAULT_DRIFT_THRESHOLD
 
 
-# Raised by evaluate(raise_on_block=True) on a blocking gate. The report is already
-# uploaded and the pointer row written before this fires, so the Airflow task log and
-# the dashboard both point at the failing report.
+# Raised by evaluate(raise_on_block=True) on a blocking gate
 class PromotionBlocked(RuntimeError):
     pass
 

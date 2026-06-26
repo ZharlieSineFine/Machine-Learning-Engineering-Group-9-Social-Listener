@@ -274,7 +274,6 @@ with DAG(
     silver = PythonOperator(task_id="silver", python_callable=_task_silver)
     ge_gate = PythonOperator(task_id="ge_gate", python_callable=_task_ge_gate)
     gold = PythonOperator(task_id="gold", python_callable=_task_gold)
-    # outlets: emit the dataset event on success -> data-triggers batch_inference.
     publish = PythonOperator(
         task_id="publish",
         python_callable=_task_publish,

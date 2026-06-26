@@ -14,10 +14,6 @@ from airflow.datasets import Dataset
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 
 MONITORING_BUCKET = "monitoring"
-
-# batch_inference emits this Dataset once fresh predictions land, so the monitor
-# runs per batch right after inference rather than on its own clock. Datasets are
-# keyed by URI, so this string MUST match the outlet in batch_inference.py.
 REVIEWS_PREDICTIONS_DATASET = Dataset("postgres://app/reviews")
 
 

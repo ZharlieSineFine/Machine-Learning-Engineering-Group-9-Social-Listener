@@ -90,7 +90,7 @@ def _carve_oot(df: pd.DataFrame, date_col: str, oot_frac: float):
     cutoff_date = sorted_dates.iloc[n_dated - n_oot]
 
     oot_mask = dated_mask & (parsed >= cutoff_date)
-    if oot_mask.all():  # degenerate (e.g. every row shares one date) — no usable in-time pool
+    if oot_mask.all():  # degenerate — no usable in-time pool
         return df, _empty_like(df), None
 
     return df[~oot_mask].copy(), df[oot_mask].copy(), cutoff_date

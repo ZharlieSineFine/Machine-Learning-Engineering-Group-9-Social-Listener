@@ -133,8 +133,6 @@ with DAG(
     dag_id="shadow_deploy_distilbert",
     description="Fine-tune DistilBERT challenger -> register MLflow Staging (shadow)",
     start_date=datetime(2025, 1, 1),
-    # Challenger retraining is human-triggered (manual), like the baseline retrain in
-    # medallion_pipeline (FORCE_TRAIN=1)
     schedule=None,  # manual / triggered only
     catchup=False,
     default_args={

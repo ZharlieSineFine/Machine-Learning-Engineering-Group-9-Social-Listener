@@ -21,7 +21,6 @@ from data.ingest.ingest_reviews import (  # noqa: E402
 DEFAULT_GOLD_ROOT = ROOT / "data" / "gold"
 DEFAULT_FALLBACK_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
 
-#Output contract: what models.baseline_sklearn.train / models.splits.split_gold expect.
 TRAINING_COLUMNS = ["text", "label", REVIEW_DATE_PARTITION]
 
 _FEATURE_GLOB = f"feature_store/{REVIEW_DATE_PARTITION}=*/part.parquet"

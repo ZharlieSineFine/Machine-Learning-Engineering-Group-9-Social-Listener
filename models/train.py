@@ -15,7 +15,7 @@ import sys
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models.baseline_sklearn import train  # noqa: E402
+from models.baseline_sklearn import train
 
 DEFAULT_DATA = ROOT / "data" / "sample" / "reviews_sample.csv"
 DEFAULT_OUT = ROOT / "models" / "artifacts" / "baseline.pkl"

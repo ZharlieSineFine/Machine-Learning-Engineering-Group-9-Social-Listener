@@ -1,9 +1,5 @@
 """Score reviews with the champion model and write predictions to the Postgres
 ``reviews`` table the dashboard reads.
-
-``run_on_silver`` is the production path: the batch_inference DAG calls it after the
-medallion publishes. ``run`` scores a replay window instead, for the demo and tests.
-Both flow text -> champion model -> predicted label -> reviews table -> dashboard.
 """
 from __future__ import annotations
 

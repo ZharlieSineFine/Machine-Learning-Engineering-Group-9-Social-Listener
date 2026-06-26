@@ -15,7 +15,7 @@ def promote_to_production(
     model_name: Optional[str] = None,
     min_f1_macro: float = DEFAULT_MIN_F1_MACRO,
 ) -> bool:
-    #Transition version to Production if it clears the metric gate; returns True if promoted, else False (never raises on a skip).
+    #Transition version to Production if it clears the metric gate; returns True if promoted, else False.
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     if not tracking_uri:
         print("[promote] MLFLOW_TRACKING_URI unset — skipping promotion")

@@ -14,15 +14,9 @@ from airflow.datasets import Dataset
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 
-# Declarative data dependency: medallion_pipeline.publish updates this Dataset; this
-# DAG is scheduled on it. Datasets are keyed by URI, so this string MUST match the
-# outlet declared in airflow/dags/medallion_pipeline.py.
+# Declarative data dependency: medallion_pipeline.publish updates this Dataset
 REVIEWS_GOLD_DATASET = Dataset("postgres://app/reviews_gold")
 
-# Downstream link: this DAG emits this Dataset once fresh predictions land, which
-# data-triggers evaluate_and_monitor — so drift is checked per batch, right after
-# inference. Keyed by URI, so this string MUST match the schedule in
-# airflow/dags/evaluate_and_monitor.py.
 REVIEWS_PREDICTIONS_DATASET = Dataset("postgres://app/reviews")
 
 

@@ -23,7 +23,7 @@ DEFAULT_NEG_THRESHOLD = 0.46
 @dataclass
 class TunedSentimentPipeline:
     #Serving wrapper around a fitted TF-IDF + LogReg pipeline; applies the tuned negative threshold.
-    #Pickled into MLflow, so it must stay importable as models.baseline_sklearn.TunedSentimentPipeline.
+    #Pickled into MLflow.
     pipeline: Any
     neg_threshold: float = DEFAULT_NEG_THRESHOLD
 
@@ -97,22 +97,11 @@ def _preprocess_text(text: str) -> str:
 def build_pipeline() -> Pipeline:
     #Return an untrained TF-IDF + LogisticRegression pipeline (minimal: trains in <5s on 1k rows).
     vectorizer = TfidfVectorizer(
-        # TODO (member): tune the VECTORIZER.
-        #   Try: ngram_range=(1, 2), min_df=2, max_df=0.95,
-        #        sublinear_tf=True, max_features=20_000.
-        #   For multilingual data: char n-grams (analyzer='char_wb',
-        #   ngram_range=(3, 5)) often beat word n-grams on Malay/English mix.
         max_features=5_000,
         preprocessor=_preprocess_text,
         stop_words="english",
     )
 
-    # TODO (member): swap the MODEL.
-    #   Baselines worth trying before moving to DistilBERT:
-    #     - LinearSVC (often beats LogReg on TF-IDF text)
-    #     - ComplementNB (fast, robust on imbalanced classes)
-    #     - SGDClassifier with class_weight='balanced'
-    #   Then graduate to models/distilbert_finetune.py (Phase 2).
     classifier = LogisticRegression(
         max_iter=1_000,
         class_weight="balanced",
