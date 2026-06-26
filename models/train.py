@@ -1,25 +1,4 @@
-"""Training entry point — callable from CLI and from the Airflow DAG.
-
-Reads the sample CSV, fits `baseline_sklearn`, writes a pickle artifact, and
-logs the run + registers the model to MLflow.
-
-CLI:
-    python models/train.py                       # uses defaults
-    python models/train.py --data data/sample/reviews_sample.csv \\
-                           --out models/artifacts/baseline.pkl
-
-MLflow behavior:
-    - If MLFLOW_TRACKING_URI is set, logging is REQUIRED. Failure to log
-      fails the training run, by design — silent skips would let bad runs
-      ship to production.
-    - If MLFLOW_TRACKING_URI is unset (smoke-test / offline mode), MLflow
-      is skipped entirely and only the pickle is produced.
-
-The pickle remains as a fallback for the FastAPI service when the registry
-isn't reachable. See api/app/model_loader.py.
-
-Owner: Van (Modeler).
-"""
+#Training entry point, callable from the CLI and the Airflow DAG.
 from __future__ import annotations
 
 import argparse
@@ -65,11 +44,7 @@ class TrainResult:
 
 
 def _log_to_mlflow(pipe: Any, metrics: dict) -> tuple[str, Optional[str]]:
-    """Log run + register model. Returns (run_id, model_version).
-
-    Raises if MLflow is unreachable — by design. The caller has already
-    decided we *should* log (by checking MLFLOW_TRACKING_URI).
-    """
+    #Log run + register model -> (run_id, model_version); raises if MLflow is unreachable, by design.
     import mlflow
     import mlflow.sklearn
 
