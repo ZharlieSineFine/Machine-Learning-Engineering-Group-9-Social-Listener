@@ -57,26 +57,44 @@ _STOPWORDS = {
     "take", "took", "taken", "taking", "put", "putting", "ask", "asked",
     "asking", "know", "knew", "known", "want", "wanted", "wanting",
     "left", "leave", "leaving", "make", "made", "making", "see", "saw",
-    "seen", "seeing", "try", "tried", "trying", "eat", "ate", "eaten",
-    "eating", "look", "looked", "looking", "think", "thought", "thinking",
-    "need", "needed", "use", "used", "using", "seem", "seemed", "call",
-    "called", "calling", "let", "keep", "kept", "bring", "brought",
-    "drive", "drove", "driven", "sit", "sat", "start", "started",
+    "seen", "seeing", "try", "tried", "trying", "look", "looked", "looking",
+    "think", "thought", "thinking", "need", "needed", "use", "used", "using",
+    "seem", "seemed", "call", "called", "calling", "let", "keep", "kept",
+    "bring", "brought", "drive", "drove", "driven", "start", "started",
 
     # Connector / transitional words
     "because", "while", "although", "though", "unless", "until", "since",
     "however", "therefore", "instead", "otherwise", "meanwhile",
 
     # Additional:
-    "like", "one", "two","place", "good", "bad", "people", "first", "done", 
-    "location", "restaurant", "drinks", "waited", "customers", "times", 
-    "way", "waiting", "something", "store", "nothing", "orders", "tasted",
-    "years", "day", "great",
+    "like", "one", "two","place", "good", "people", "first", "done",
+    "location", "restaurant", "drinks", "waited", "customers", "times",
+    "way", "waiting", "something", "store", "nothing", "orders",
+    "years", "day", "great", "customer"
 }
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z']{2,}")  # 3+ letter words
 
 
 # ---------- review data ----------
+
+def load_reviews_via_api(api_url: str, days: int = 14, timeout: int = 5) -> pd.DataFrame:
+    """Fetch recent reviews from the serving API (`GET /reviews`).
+
+    The Marketing dashboard's primary data path: the API owns DB access, so the
+    dashboard needs no Postgres credentials for the business view. Raises on
+    transport/HTTP error so the caller can fall back to local files.
+    """
+    import requests
+
+    r = requests.get(f"{api_url}/reviews", params={"days": days}, timeout=timeout)
+    r.raise_for_status()
+    df = pd.DataFrame(r.json(), columns=["text", "label", "source", "review_date"])
+    if "review_date" in df.columns:
+        df["review_date"] = pd.to_datetime(
+            df["review_date"], errors="coerce", utc=True, format="ISO8601"
+        )
+    return df
+
 
 def load_reviews(
     dsn: Optional[str] = None,
@@ -119,6 +137,7 @@ def load_reviews(
         df = df[df["review_date"] >= cutoff]
     return df
 
+
 def _load_gold_parquet(gold_root: Path, days: int) -> Optional[pd.DataFrame]:
     feature_root = gold_root / "feature_store"
     label_root = gold_root / "label_store"
@@ -154,6 +173,7 @@ def _load_gold_parquet(gold_root: Path, days: int) -> Optional[pd.DataFrame]:
     df = feat.merge(lab[["review_id", "label"]], on="review_id", how="inner")
     df["review_date"] = pd.to_datetime(df["review_date"], errors="coerce")
     return df
+
 
 # ---------- latest batch ----------
 
