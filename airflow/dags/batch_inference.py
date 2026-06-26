@@ -19,9 +19,15 @@ from airflow.operators.python import PythonOperator, ShortCircuitOperator
 # outlet declared in airflow/dags/medallion_pipeline.py.
 REVIEWS_GOLD_DATASET = Dataset("postgres://app/reviews_gold")
 
+# Downstream link: this DAG emits this Dataset once fresh predictions land, which
+# data-triggers evaluate_and_monitor — so drift is checked per batch, right after
+# inference. Keyed by URI, so this string MUST match the schedule in
+# airflow/dags/evaluate_and_monitor.py.
+REVIEWS_PREDICTIONS_DATASET = Dataset("postgres://app/reviews")
+
 
 def _should_run_inference(**context) -> bool:
-    """ShortCircuit kill-switch: run unless serving is manually paused."""
+    # Kill-switch: skip the run when serving is manually paused.
     if os.getenv("INFERENCE_PAUSED") == "1":
         print("[batch_inference.guard] INFERENCE_PAUSED=1 -> skipping run")
         return False
@@ -30,14 +36,10 @@ def _should_run_inference(**context) -> bool:
 
 
 def _task_score(**context) -> dict:
-    """Score the latest silver window into ``reviews`` (production read-side).
-
-    Replaces only the most recent day (``clear_today``) and stamps the rows "now"
-    (``as_now``), so the multi-day history/timeline is preserved while today's batch
-    is refreshed with freshly-scored reviews.
-    """
     from serving.batch_infer import run_on_silver
 
+    # clear_today replaces only the most recent day; as_now stamps the rows "now",
+    # so older days stay as history while today's batch gets rescored.
     summary = run_on_silver(as_now=True, clear_today=True)
     print(f"[batch_inference] {summary}")
     return summary
@@ -45,7 +47,7 @@ def _task_score(**context) -> dict:
 
 with DAG(
     dag_id="batch_inference",
-    description="Champion inference on the freshly-built silver window -> reviews (Dataset-triggered by medallion publish)",
+    description="Champion inference on the freshly-built silver window -> reviews (Dataset-triggered by medallion publish; emits reviews Dataset -> evaluate_and_monitor)",
     start_date=datetime(2025, 1, 1),
     schedule=[REVIEWS_GOLD_DATASET],  # data-aware: runs when the medallion publishes
     catchup=False,
@@ -64,6 +66,10 @@ with DAG(
         task_id="score_latest_batch",
         python_callable=_task_score,
     )
-    inference_completed = EmptyOperator(task_id="inference_completed")
+    # outlet: emit the predictions Dataset on success -> data-triggers evaluate_and_monitor.
+    inference_completed = EmptyOperator(
+        task_id="inference_completed",
+        outlets=[REVIEWS_PREDICTIONS_DATASET],
+    )
 
     guard >> score >> inference_completed

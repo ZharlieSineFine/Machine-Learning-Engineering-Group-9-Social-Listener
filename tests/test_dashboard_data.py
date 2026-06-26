@@ -17,7 +17,6 @@ from dashboard.data import (
 )
 
 
-# ---------- load_reviews ----------
 
 def test_load_reviews_csv_fallback_returns_sample():
     df = load_reviews(dsn=None)
@@ -35,8 +34,6 @@ def test_load_reviews_falls_back_when_postgres_unreachable(tmp_path):
     df = load_reviews(dsn="postgresql://nobody:nope@127.0.0.1:1/none")
     assert not df.empty  # falls back to the bundled sample
 
-
-# ---------- sentiment_timeline ----------
 
 def _df_with_timestamps(n: int) -> pd.DataFrame:
     rows = []
@@ -75,8 +72,6 @@ def test_timeline_pct_positive_is_in_zero_hundred_range():
     assert ((out["pct_negative"] >= 0) & (out["pct_negative"] <= 100)).all()
 
 
-# ---------- negative_word_counts ----------
-
 def test_negative_word_counts_strips_stopwords_and_short_tokens():
     df = pd.DataFrame({
         "text": [
@@ -105,8 +100,6 @@ def test_negative_word_counts_returns_empty_on_missing_columns():
     assert negative_word_counts(df) == {}
 
 
-# ---------- list_mlflow_runs ----------
-
 def test_list_mlflow_runs_returns_empty_when_uri_unset(monkeypatch):
     monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
     assert list_mlflow_runs(tracking_uri=None).empty
@@ -122,8 +115,6 @@ def test_list_mlflow_runs_returns_empty_when_unreachable(monkeypatch):
     )
     assert df.empty  # connection refused → graceful empty
 
-
-# ---------- fetch_drift_html ----------
 
 def test_fetch_drift_html_parses_s3_url():
     class FakeMinIO:

@@ -1,8 +1,6 @@
-"""Unit/smoke tests for /predict/batch + /reload — no MLflow needed.
+#Unit/smoke tests for /predict/batch + /reload — no MLflow needed.
+#The API loads the local pickle so these tests don't need the compose stack running.
 
-The API loads the local pickle (same pattern as the original smoke test)
-so these tests don't need the compose stack running.
-"""
 from __future__ import annotations
 
 import os
@@ -21,7 +19,7 @@ SAMPLE_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
 
 @pytest.fixture(scope="module")
 def api_client(tmp_path_factory):
-    """Train a fresh pickle, point the loader at it, boot the API in-process."""
+    #Train a fresh pickle, point the loader at it, boot the API in-process.
     artifact = tmp_path_factory.mktemp("artifacts") / "baseline.pkl"
     # Train without MLflow so the pickle is the source of truth.
     os.environ.pop("MLFLOW_TRACKING_URI", None)
@@ -33,9 +31,6 @@ def api_client(tmp_path_factory):
         sys.modules.pop(mod, None)
     from app.main import app
     return TestClient(app)
-
-
-# -------- /predict/batch --------
 
 def test_batch_returns_one_label_per_text(api_client):
     r = api_client.post("/predict/batch", json={"texts": [
@@ -70,11 +65,8 @@ def test_batch_preserves_order(api_client):
     r = api_client.post("/predict/batch", json={"texts": texts})
     labels = r.json()["labels"]
     assert len(labels) == len(texts)
-    # We don't assert exact labels (model can drift) — just shape + content type.
     assert all(isinstance(lbl, str) for lbl in labels)
 
-
-# -------- /reload auth --------
 
 def test_reload_disabled_when_admin_token_unset(api_client):
     os.environ.pop("ADMIN_TOKEN", None)

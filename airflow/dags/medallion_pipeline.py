@@ -38,7 +38,7 @@ _TRAINING_CSV = _GOLD_ROOT / "_training_frame.csv"
 
 
 def _minio_client():
-    """boto3 S3 client pointed at MinIO"""
+    # boto3 S3 client pointed at MinIO.
     import boto3
     from botocore.client import Config
 
@@ -171,7 +171,7 @@ def _task_gate(**context) -> dict:
     with open(artifact_path, "rb") as fh:
         model = pickle.load(fh)
 
-    # reference = the training frame (text + label); current = recent silver with
+    # reference = the training frame (text + label); current = recent silver
     reference = pd.read_csv(_TRAINING_CSV)
     recent = _load_recent_silver(_SILVER_ROOT, DRIFT_RECENT_PARTITIONS)
     if recent is None or recent.empty:

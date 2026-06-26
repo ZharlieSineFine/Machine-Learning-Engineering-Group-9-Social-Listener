@@ -10,13 +10,19 @@ if _REPO_ROOT.exists() and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from airflow import DAG
+from airflow.datasets import Dataset
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 
 MONITORING_BUCKET = "monitoring"
 
+# batch_inference emits this Dataset once fresh predictions land, so the monitor
+# runs per batch right after inference rather than on its own clock. Datasets are
+# keyed by URI, so this string MUST match the outlet in batch_inference.py.
+REVIEWS_PREDICTIONS_DATASET = Dataset("postgres://app/reviews")
+
 
 def _minio_client():
-    """boto3 S3 client pointed at MinIO, from the same env the stack already sets."""
+    # boto3 S3 client pointed at MinIO, from the env the stack already sets.
     import boto3
     from botocore.client import Config
 
@@ -40,7 +46,7 @@ def _app_dsn() -> str:
 
 
 def _upload_report(client, local_path: Path, run_date: str) -> str:
-    """Upload the HTML report to s3://monitoring/{run_date}/report.html."""
+    # Lands at s3://monitoring/{run_date}/report.html.
     key = f"{run_date}/report.html"
     client.upload_file(
         Filename=str(local_path),
@@ -54,7 +60,7 @@ def _upload_report(client, local_path: Path, run_date: str) -> str:
 def _record_report(
     dsn: str, run_date: str, report_url: str, drift_score: float, blocked: bool
 ) -> None:
-    """Insert a pointer row into `monitoring_reports` for the dashboard to read."""
+    # Pointer row the dashboard reads to find the report.
     import psycopg2
 
     conn = psycopg2.connect(dsn)
@@ -72,16 +78,13 @@ def _record_report(
 
 
 def _load_champion_best_effort():
-    """Load the champion pipeline for prediction drift, or None on any failure.
-
-    The monitor must stay green even when the artifact is missing, so prediction
-    drift is best-effort: without a model we still get data + label drift.
-    """
+    # Prediction drift needs the champion, but the monitor must stay green without
+    # it. Return None on any failure; we still get data + label drift in that case.
     try:
         from serving.batch_infer import load_model
 
         return load_model()
-    except Exception as exc:  # missing pickle / import error — degrade, don't fail
+    except Exception as exc:  # missing pickle / import error: degrade, don't fail
         print(
             f"[evaluate_and_monitor] champion model unavailable, "
             f"prediction drift skipped ({exc})"
@@ -111,7 +114,7 @@ def _task_drift(**context) -> dict:
         mon = run_monitor_drift(model=model)
         source = "silver"
 
-    # Both branches return a MonitorResult — map uniformly.
+    # Both branches return a MonitorResult, so map them the same way.
     drift_score, blocked = mon.data_drift_score, mon.blocked
     report_path, evidently_ran = mon.report_path, mon.evidently_ran
     n_ref, n_cur = mon.n_reference, mon.n_current
@@ -143,7 +146,7 @@ def _task_drift(**context) -> dict:
 
 
 def _should_alert(**context) -> bool:
-    """ShortCircuit: only fire the alert when drift actually blocked the gate."""
+    # Only fire the alert when drift actually blocked the gate.
     info = context["ti"].xcom_pull(task_ids="drift_check") or {}
     blocked = bool(info.get("blocked"))
     print(
@@ -167,9 +170,9 @@ def _task_send_alert(**context) -> None:
 
 with DAG(
     dag_id="evaluate_and_monitor",
-    description="Pure-observation Evidently drift monitor → monitoring_reports + alert (no retrain)",
+    description="Pure-observation Evidently drift monitor → monitoring_reports + alert (no retrain); data-triggered per batch off batch_inference",
     start_date=datetime(2025, 1, 1),
-    schedule="0 */6 * * *", 
+    schedule=[REVIEWS_PREDICTIONS_DATASET],  # per batch: runs when batch_inference lands fresh predictions
     catchup=False,
     default_args={
         "owner": "data",

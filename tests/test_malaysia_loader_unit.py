@@ -1,9 +1,5 @@
-"""Unit tests for the RAW Malaysia TripAdvisor Bronze adapter.
+#Unit tests for the RAW Malaysia TripAdvisor Bronze adapter.
 
-Bronze keeps the export's columns verbatim — crucially the `Dates` column stays as the
-literal "Reviewed DD Month YYYY" string (no ISO reformatting; that's Silver's job, tested
-in test_build_silver_unit.py). The adapter only *selects* beverage rows + stamps provenance.
-"""
 from __future__ import annotations
 
 import pandas as pd

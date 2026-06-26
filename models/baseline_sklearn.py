@@ -1,20 +1,4 @@
-"""Baseline sentiment classifier — TF-IDF + LogisticRegression.
-
-This is the **thin-slice** model from WORKFLOW.md Phase 1. It exists to keep
-the end-to-end pipeline (ingest -> train -> registry -> API -> dashboard)
-green so nothing is blocked while the modelling team iterates.
-
-Owner: Van (Modeler), Amelia (second pair).
-
-The training entry point is `models/train.py` — this module only exposes:
-    - build_pipeline()  : returns an untrained sklearn Pipeline
-    - train(df)         : fits the pipeline, returns (pipeline, metrics)
-    - LABELS            : the canonical label list
-
-Members: search for `# TODO (member)` to find the spots where you should
-improve the model. The smoke test does NOT depend on these improvements —
-it only checks that the pipeline can fit + predict end to end.
-"""
+#Baseline sentiment classifier: TF-IDF + LogisticRegression (the Phase 1 thin-slice model).
 from __future__ import annotations
 
 import re
@@ -38,17 +22,8 @@ DEFAULT_NEG_THRESHOLD = 0.46
 
 @dataclass
 class TunedSentimentPipeline:
-    """Serving wrapper around a fitted TF-IDF + LogReg pipeline.
-
-    Returns canonical string labels and applies the champion's tuned negative-class
-    threshold. Works whether the wrapped pipeline predicts string classes (trained
-    on labels) or integer classes 0/1/2 (the registered champion
-    champion_baseline_v3.pkl), so the API + MLflow serve real labels, not class ids.
-
-    Pickled with the model in MLflow (mlflow.sklearn) — must stay importable as
-    models.baseline_sklearn.TunedSentimentPipeline for the API to load it.
-    """
-
+    #Serving wrapper around a fitted TF-IDF + LogReg pipeline; applies the tuned negative threshold.
+    #Pickled into MLflow, so it must stay importable as models.baseline_sklearn.TunedSentimentPipeline.
     pipeline: Any
     neg_threshold: float = DEFAULT_NEG_THRESHOLD
 
@@ -109,7 +84,7 @@ _EMOJI_REPLACEMENTS = {
 
 
 def _preprocess_text(text: str) -> str:
-    """Normalize noisy review text before tokenization."""
+    #Normalize noisy review text before tokenization.
     text = text.lower()
     text = _URL_RE.sub(" ", text)
     text = _MENTION_RE.sub(" ", text)
@@ -120,10 +95,7 @@ def _preprocess_text(text: str) -> str:
 
 
 def build_pipeline() -> Pipeline:
-    """Return an untrained TF-IDF + LogisticRegression pipeline.
-
-    Intentionally minimal so the baseline trains in <5 seconds on 1k rows.
-    """
+    #Return an untrained TF-IDF + LogisticRegression pipeline (minimal: trains in <5s on 1k rows).
     vectorizer = TfidfVectorizer(
         # TODO (member): tune the VECTORIZER.
         #   Try: ngram_range=(1, 2), min_df=2, max_df=0.95,
@@ -151,7 +123,7 @@ def build_pipeline() -> Pipeline:
 
 
 def _evaluate(pipe: Pipeline, frame: pd.DataFrame) -> Optional[dict]:
-    """Score a fitted pipeline on a non-empty eval frame; None if the frame is empty."""
+    #Score a fitted pipeline on a non-empty eval frame; None if the frame is empty.
     if frame.empty:
         return None
     y_true = frame["label"]
@@ -179,19 +151,7 @@ def train(
     oot_frac: float = 0.2,
     val_frac: float = 0.15,
 ) -> Tuple[Pipeline, dict]:
-    """Fit the baseline with a train/validation/test/OOT split; return (pipeline, metrics).
-
-    `df` must have `text` and `label` (label in LABELS). When `df` carries a `date` column,
-    the most recent `oot_frac` of dated rows is held out as an out-of-time (OOT) set and
-    scored separately (see models/splits.py); on date-less data OOT is empty and this is a
-    plain stratified train/val/test split. `test_size` is the in-time *test* fraction (kept
-    as the legacy parameter name).
-
-    The model is fit on the train split only — `val` is reserved for tuning / model
-    selection (the baseline doesn't tune yet). `f1_macro` / `f1_weighted` are the in-time
-    *test* scores (backward-compatible keys); the OOT scores are reported under `*_oot`, and
-    the test-vs-OOT gap is the headline signal of temporal drift.
-    """
+    #Fit the baseline with a train/validation/test/OOT split; return (pipeline, metrics).
     if not {"text", "label"}.issubset(df.columns):
         raise ValueError("df must have 'text' and 'label' columns")
 

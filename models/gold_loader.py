@@ -1,26 +1,4 @@
-"""Gold -> training-frame assembler.
-
-The medallion pipeline (``data.refine.build_gold``) writes two Hive-partitioned
-parquet stores keyed by ``review_date``::
-
-    data/gold/feature_store/review_date=YYYY-MM-DD/part.parquet   # review_id, review_date, text
-    data/gold/label_store/review_date=YYYY-MM-DD/part.parquet     # review_id, review_date, label
-
-Training wants a single flat frame with ``text`` / ``label`` / ``review_date``.
-This module joins the two stores on ``review_id`` and hands that frame to
-``models.train.run(df=...)``.
-
-This is the **handoff seam**: when the real Gold/DB source lands, swap the body
-of :func:`load_gold_training_frame` (or point ``gold_root`` at it). The DAG and
-the training code don't change. Until then, an empty/absent Gold store falls
-back to the in-repo sample CSV so the cycle is runnable immediately.
-
-Owner: Van (Modeler) with Charlie + Ha (Data & Eval).
-
-NOTE: ported into the ``data_loader`` branch during the Airflow integration so
-``medallion_pipeline`` runs end-to-end. Coordinate the eventual merge with
-Van, who owns ``models/``.
-"""
+#Gold -> training-frame assembler: join the feature + label stores into a flat text/label/review_date frame.
 from __future__ import annotations
 
 import sys
@@ -43,7 +21,7 @@ from data.ingest.ingest_reviews import (  # noqa: E402
 DEFAULT_GOLD_ROOT = ROOT / "data" / "gold"
 DEFAULT_FALLBACK_CSV = ROOT / "data" / "sample" / "reviews_sample.csv"
 
-# Output contract — what models.baseline_sklearn.train / models.splits.split_gold expect.
+#Output contract: what models.baseline_sklearn.train / models.splits.split_gold expect.
 TRAINING_COLUMNS = ["text", "label", REVIEW_DATE_PARTITION]
 
 _FEATURE_GLOB = f"feature_store/{REVIEW_DATE_PARTITION}=*/part.parquet"
@@ -51,7 +29,7 @@ _LABEL_GLOB = f"label_store/{REVIEW_DATE_PARTITION}=*/part.parquet"
 
 
 def _read_store(gold_root: Path, glob: str, columns: list[str]) -> pd.DataFrame:
-    """Concat every parquet partition of one Gold store into a single frame."""
+    #Concat every parquet partition of one Gold store into a single frame.
     parts = sorted(gold_root.glob(glob))
     frames = [pd.read_parquet(p) for p in parts]
     if not frames:
@@ -63,14 +41,7 @@ def load_gold_training_frame(
     gold_root: Path = DEFAULT_GOLD_ROOT,
     fallback_csv: Optional[Path] = DEFAULT_FALLBACK_CSV,
 ) -> pd.DataFrame:
-    """Join the Gold feature + label stores into a flat training frame.
-
-    Returns a frame with columns ``text`` / ``label`` / ``review_date``.
-
-    If the Gold stores are empty/absent and ``fallback_csv`` is set, reads the
-    sample CSV instead (and warns). Pass ``fallback_csv=None`` to require Gold
-    and raise on an empty store.
-    """
+    #Join the Gold feature + label stores into a flat training frame; falls back to the sample CSV when Gold is empty (unless fallback_csv=None).
     gold_root = Path(gold_root)
     features = _read_store(gold_root, _FEATURE_GLOB, FEATURE_STORE_COLUMNS)
     labels = _read_store(gold_root, _LABEL_GLOB, LABEL_STORE_COLUMNS)
@@ -120,11 +91,7 @@ def materialize_training_csv(
     gold_root: Path = DEFAULT_GOLD_ROOT,
     fallback_csv: Optional[Path] = DEFAULT_FALLBACK_CSV,
 ) -> Path:
-    """Load the Gold training frame and write it to a CSV ``train.run`` can read.
-
-    Keeps ``models.train.run(data_path=...)`` usable as-is (it expects a CSV path,
-    not a DataFrame). Returns the written path.
-    """
+    #Load the Gold training frame and write it to a CSV that train.run can read; returns the path.
     df = load_gold_training_frame(gold_root, fallback_csv)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

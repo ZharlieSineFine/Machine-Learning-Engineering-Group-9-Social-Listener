@@ -1,8 +1,5 @@
-"""Unit tests for the MLflow logging path in models/train.py.
+#Unit tests for the MLflow logging path in models/train.py.
 
-We mock `mlflow` and `mlflow.sklearn` to verify the right calls happen with
-the right shape, without needing a tracking server.
-"""
 from __future__ import annotations
 
 import os

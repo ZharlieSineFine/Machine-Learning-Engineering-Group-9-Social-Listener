@@ -1,10 +1,6 @@
 """Headless smoke test for the Streamlit app.
 
 Uses streamlit.testing.v1.AppTest to render the whole script in-process.
-No browser, no Postgres, no MLflow — just verifies:
-  * The page renders end-to-end without raising.
-  * The expected section headers (subheaders) appear.
-  * Tiles get real metrics (not "—").
 
 One test that asserts everything (instead of three) because `AppTest.run()`
 takes 30+s — re-running it per assertion blows the suite budget.

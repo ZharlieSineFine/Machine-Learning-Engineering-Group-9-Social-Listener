@@ -1,26 +1,4 @@
-"""DistilBERT fine-tuning for sentiment classification.
-
-The Phase 2 model from WORKFLOW.md. Trains a 3-class classifier on top of
-`distilbert-base-uncased` and saves the fine-tuned weights to a directory
-that MLflow can pick up.
-
-CLI:
-    python models/distilbert_finetune.py \\
-        --data data/sample/reviews_sample.csv \\
-        --out  models/artifacts/distilbert \\
-        --epochs 1
-
-Owner: Van (Modeler), Amelia (second pair).
-
-Design notes:
-    * `train_distilbert(df, ...) -> (model_dir, metrics)` mirrors the shape
-      of `models.baseline_sklearn.train(df) -> (pipeline, metrics)` so the
-      training DAG can swap baselines without restructuring.
-    * `max_steps` overrides `num_epochs` and lets the test suite run a
-      ~2-step training pass to verify the path without burning minutes.
-    * Saves both the model and the tokenizer so the API can rehydrate
-      everything from one directory.
-"""
+#DistilBERT fine-tuning for 3-class sentiment (Phase 2); saves weights + tokenizer to a dir MLflow can pick up.
 from __future__ import annotations
 
 import argparse
@@ -65,7 +43,7 @@ class TrainOutput:
 
 
 def _encode_dataset(df: pd.DataFrame, tokenizer, max_length: int):
-    """Tokenize the text column and attach integer labels."""
+    #Tokenize the text column and attach integer labels.
     from datasets import Dataset
 
     df = df.dropna(subset=["text", "label"]).copy()
@@ -86,7 +64,7 @@ def _encode_dataset(df: pd.DataFrame, tokenizer, max_length: int):
 
 
 def _compute_metrics(eval_pred) -> dict:
-    """Trainer-friendly compute_metrics — surge-oriented negative-class metrics."""
+    #Trainer-friendly compute_metrics; surfaces negative-class metrics.
     from sklearn.metrics import accuracy_score, classification_report, f1_score
 
     logits, labels = eval_pred
@@ -115,11 +93,7 @@ def train_distilbert(
     cfg: TrainConfig | None = None,
     test_size: float = 0.2,
 ) -> Tuple[Path, dict]:
-    """Fine-tune DistilBERT on `df` and save the model to `out_dir`.
-
-    Returns (out_dir, metrics_dict). `metrics_dict` includes the eval-set
-    macro-F1 and accuracy so the training DAG can forward them to MLflow.
-    """
+    #Fine-tune DistilBERT on df and save the model to out_dir; returns (out_dir, metrics_dict) with eval macro-F1 + accuracy.
     cfg = cfg or TrainConfig()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -127,8 +101,7 @@ def train_distilbert(
     if not {"text", "label"}.issubset(df.columns):
         raise ValueError("df must have 'text' and 'label' columns")
 
-    # Late imports — transformers+torch are heavy; only callers that need
-    # this module pay the import cost.
+    #Late imports: transformers+torch are heavy, so only callers that need this module pay the import cost.
     import torch
     from sklearn.model_selection import train_test_split
     from transformers import (
@@ -188,7 +161,7 @@ def train_distilbert(
 
 
 def predict(texts: List[str], model_dir: Path) -> List[str]:
-    """Convenience predictor — used by the smoke check in main."""
+    #Convenience predictor used by the smoke check in main.
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 

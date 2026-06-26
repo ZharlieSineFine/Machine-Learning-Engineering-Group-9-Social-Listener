@@ -13,7 +13,7 @@ Build a production-style sentiment analysis system for online restaurant brand r
 - **Cloud-portable (stretch)** — swap Postgres → RDS, MinIO → S3 and the stack lifts to AWS/GCP/Azure
 - **Reproducible** — pinned dependencies; CI runs the same images as local dev
 - **Thin-slice first** — a working skeleton end-to-end before depth in any one layer
-- **Closed-loop** — drift detected by Evidently triggers retraining; human-corrected labels feed the next training run
+- **Closed-loop (human-in-the-loop)** — Evidently flags drift and alerts; a human decides whether to retrain (`FORCE_TRAIN=1`), and human-corrected labels feed the next training run
 
 ---
 
@@ -21,14 +21,14 @@ Build a production-style sentiment analysis system for online restaurant brand r
 
 | Layer | Tool | Why |
 |---|---|---|
-| Orchestration | **Airflow** | Schedules every step on a **6-hour batch cycle** |
+| Orchestration | **Airflow** | Data build on a **6-hour batch cycle**; inference and drift monitoring are **data-triggered** off it via declarative Datasets, each its own DAG |
 | Storage (metadata + features) | **Postgres** | Source of truth for reviews, predictions, run metadata |
 | Object storage | **MinIO** | S3-compatible local store for raw JSON, model artifacts, drift reports |
 | Modeling | **HuggingFace Transformers + scikit-learn** | DistilBERT fine-tune; sklearn baseline + utilities |
 | Topic modelling (stretch) | **BERTopic** | Theme extraction from negative reviews |
 | Experiment tracking + registry | **MLflow** | Logs runs, metrics, params; promotes models `None → Staging → Production` |
 | Data validation | **Great Expectations** | Schema + value-range checks between bronze → silver |
-| Drift + performance monitoring | **Evidently** | Data quality, model drift, prediction confidence — fires retraining when thresholds break |
+| Drift + performance monitoring | **Evidently** | Per-column PSI on **data (feature), label, and prediction** distributions; alerts when thresholds break — a human decides whether to retrain (no auto-retrain) |
 | Serving | **FastAPI** | REST endpoint; **shadow deploy** (candidate model runs alongside production for comparison before promotion) |
 | Dashboard | **Streamlit** | KPI tiles, sentiment timelines, alerts, digest |
 | Tests | **pytest** | Unit + integration; smoke container in compose |
@@ -39,7 +39,7 @@ Build a production-style sentiment analysis system for online restaurant brand r
 
 ## 3. Data Flow — Medallion Architecture
 
-Airflow schedules every step on a **6-hour batch inference cycle**.
+Airflow runs the data build on a **6-hour batch cycle**; inference is data-triggered off each `publish`, and drift monitoring is data-triggered per batch off inference.
 
 ```
    SOURCES                BRONZE              SILVER              GOLD
@@ -62,9 +62,9 @@ Airflow schedules every step on a **6-hour batch inference cycle**.
                                                           │
                               ┌───────────────────────────┘
                               ▼
-        MLOps Monitoring & Feedback Loop:
-        Evidently watches data quality, model drift, and prediction confidence.
-        Drift > threshold → retraining is triggered automatically.
+        MLOps Monitoring & Feedback Loop (human-in-the-loop):
+        Evidently watches data, label, and prediction distribution drift (PSI).
+        Drift > threshold → alert only; a human decides whether to retrain (FORCE_TRAIN=1).
         Human-corrected labels feed the next training run.
 ```
 
@@ -128,6 +128,13 @@ carry no shop-name column, so the text is replayed verbatim (no brand replacemen
 
 The shadow window is **two 6-hour batch cycles by default** (12h) before promotion is considered.
 
+> **Status (prototype).** The shadow-deploy *comparison* lifecycle above is the intended
+> design. Today `shadow_deploy_distilbert` fine-tunes the challenger and registers it to
+> MLflow **Staging**, but the live N-hour Production-vs-Staging comparison and the
+> auto-promotion gate are not yet wired — the challenger never reaches Production. The only
+> promotion path in code is the **baseline** `gate` inside `medallion_pipeline`, run
+> human-triggered via `FORCE_TRAIN=1`.
+
 ### Train / validation / test / OOT split
 
 `train_model` doesn't split the Gold set at random. It uses the **Silver** `date` column (normalised to ISO from each source's raw Bronze stamp) to build an **out-of-time (OOT)** hold-out (`models/splits.py`): the most recent slice of reviews (by timestamp) is set aside as a stand-in for "reviews that arrive after we ship", and everything older is split — stratified on label — into **train** (fit), **validation** (tune / model selection), and **test** (in-time estimate).
@@ -146,12 +153,10 @@ Rows with a null `date` join the in-time pool; if no row is dated (e.g. the seed
 mle_project/
 ├── airflow/                      # DAGs + Airflow config         (Charlie, Ha; Anh on infra)
 │   ├── dags/
-│   │   ├── ingest_bronze.py      # Sources → Bronze         (6h)
-│   │   ├── refine_silver.py      # Bronze → Silver          (6h, GE-gated)
-│   │   ├── build_gold.py         # Silver → Gold            (6h)
-│   │   ├── train_model.py        # Gold → MLflow run        (daily)
-│   │   ├── shadow_score.py       # Candidate predicts on live (6h)
-│   │   └── evaluate_and_monitor.py  # Evidently drift + promotion gate (6h)
+│   │   ├── medallion_pipeline.py      # Bronze→Silver→GE→Gold→publish (6h); +train→gate→promote→reload behind FORCE_TRAIN=1
+│   │   ├── batch_inference.py         # Champion scores latest silver → reviews (data-triggered off publish's reviews_gold Dataset)
+│   │   ├── evaluate_and_monitor.py    # Evidently data/label/prediction drift → alert (data-triggered per batch off inference; no gate, no retrain)
+│   │   └── shadow_deploy_distilbert.py  # Fine-tune DistilBERT challenger → MLflow Staging (manual; never Production)
 │   └── plugins/
 ├── api/                          # FastAPI service               (Amelia)
 │   ├── app/

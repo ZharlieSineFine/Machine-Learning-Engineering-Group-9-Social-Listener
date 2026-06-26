@@ -1,4 +1,4 @@
-"""Unit tests for the Silver -> Gold refiner (data/refine/build_gold.py)."""
+#Unit tests for the Silver -> Gold refiner (data/refine/build_gold.py).
 from __future__ import annotations
 
 import pandas as pd

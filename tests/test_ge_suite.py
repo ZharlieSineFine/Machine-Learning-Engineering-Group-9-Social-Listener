@@ -1,7 +1,5 @@
-"""Unit tests for the Great Expectations suite.
+#Unit tests for the Great Expectations suite.
 
-No DB. Builds DataFrames in-memory, runs the suite, asserts pass/fail.
-"""
 from __future__ import annotations
 
 import pandas as pd
@@ -81,10 +79,6 @@ def test_raise_for_status_raises_on_failure():
 def test_raise_for_status_silent_on_success():
     validate_reviews(_good_df()).raise_for_status()  # no-op
 
-
-# ---------------------------------------------------------------------------
-# Step 9 — full suite additions
-# ---------------------------------------------------------------------------
 
 def test_text_below_min_length_fails():
     df = _good_df()

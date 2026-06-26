@@ -1,7 +1,5 @@
-"""Unit tests for the Bronze -> Silver refiner (data/refine/build_silver.py).
-
-Silver = join, cleaning, ISO date normalisation, source_id, dedup. No labels (that's Gold).
-"""
+#Unit tests for the Bronze -> Silver refiner (data/refine/build_silver.py).
+#Silver = join, cleaning, ISO date normalisation, source_id, dedup.
 from __future__ import annotations
 
 import pandas as pd
