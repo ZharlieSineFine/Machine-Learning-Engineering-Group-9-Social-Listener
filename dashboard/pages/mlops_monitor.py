@@ -103,6 +103,11 @@ def _plotly_layout(height: int, c: dict) -> dict:
         yaxis=dict(gridcolor=c["grid"], color=c["muted"], zeroline=False),
     )
 
+
+# ---------------------------------------------------------------------------
+# Data fetchers
+# ---------------------------------------------------------------------------
+
 def _runs_from_checkpoints() -> pd.DataFrame:
     """Fallback: static metrics from trainer_state.json checkpoints (Van's runs)."""
     _CHECKPOINT_RUNS = [

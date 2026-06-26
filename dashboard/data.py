@@ -1,5 +1,12 @@
-#Pure data-loading and transformation helpers for the Streamlit app.
+"""Pure data-loading and transformation helpers for the Streamlit app.
 
+Keeping these out of `app.py` makes them unit-testable (Streamlit's runtime
+context isn't trivial to mock). All functions either:
+  - take their dependencies as args (DSN, MLflow client), or
+  - degrade gracefully when the backing service isn't reachable.
+
+Owner: Amelia.
+"""
 from __future__ import annotations
 
 import os
