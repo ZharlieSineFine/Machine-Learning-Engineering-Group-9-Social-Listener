@@ -25,7 +25,6 @@ Run (batch / legacy — all bronze under flat dirs):
         --yelp-dir data/bronze/yelp --tripadvisor data/bronze/tripadvisor/reviews.csv \\
         --out data/silver/reviews.csv
 
-Owner: Charlie + Ha (Data & Eval).
 """
 from __future__ import annotations
 

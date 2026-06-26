@@ -1,11 +1,5 @@
 # Data — Medallion Layers
 
-
-
-**Owner:** Charlie + Ha
-
-
-
 This folder holds the **code** that builds the medallion layers. The data itself lives in MinIO (bronze, gold artifacts) and Postgres (silver, gold tables). See [ARCHITECTURE.md §3](../ARCHITECTURE.md#3-data-flow--medallion-architecture) for the full picture.
 
 

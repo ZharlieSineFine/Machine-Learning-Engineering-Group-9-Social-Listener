@@ -1,7 +1,5 @@
-"""FastAPI service — /health, /predict, /predict/batch, /reload.
+#FastAPI service — /health, /predict, /predict/batch, /reload.
 
-Owner: Amelia.
-"""
 from __future__ import annotations
 
 import os
@@ -22,10 +20,6 @@ from app import shadow
 
 app = FastAPI(title="Sentiment API", version="0.2.0")
 
-# Module-level — mutated by /reload. CPython attribute assignment is atomic,
-# which is sufficient for the single-process uvicorn worker the compose
-# stack runs. Multi-worker deployments should plumb the reload signal
-# through Redis/SIGHUP instead.
 _model: LoadedModel | None = load_model()
 
 # Staging model — optional. Present only when Van has promoted a candidate
